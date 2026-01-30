@@ -166,7 +166,7 @@ public class WmsDataSyncService : BackgroundService
     }
 
     /// <summary>
-    /// Синхронизация заданий
+    /// Синхронизация заданий (Task action из WMS)
     /// </summary>
     private async Task SyncTasksAsync(CancellationToken ct)
     {
@@ -192,28 +192,61 @@ public class WmsDataSyncService : BackgroundService
         {
             _logger.LogDebug("Syncing {Count} tasks from WMS", allTasks.Count);
 
-            // Конвертируем и сохраняем в TimescaleDB
+            // Конвертируем Task action в TaskRecord для TimescaleDB
+            // Маппинг полей WMS Task action → TaskRecord:
+            //   id → Id (номер документа)
+            //   actionId → используем как Id если это UUID
+            //   storageBinCode → FromSlot (источник)
+            //   storagePalletCode → PalletId
+            //   allocationBinCode → ToSlot (назначение)
+            //   assigneeCode → ForkliftId (исполнитель, может быть карщик или сборщик)
+            //   actionType → определяет тип операции
             var records = allTasks.Select(t => new TaskRecord
             {
-                Id = Guid.TryParse(t.Id, out var id) ? id : Guid.NewGuid(),
+                // Используем ActionId как UUID если есть, иначе генерируем
+                Id = Guid.TryParse(t.ActionId, out var actionGuid) ? actionGuid
+                   : Guid.TryParse(t.Id, out var idGuid) ? idGuid
+                   : Guid.NewGuid(),
+
                 CreatedAt = t.CreatedAt,
                 StartedAt = t.StartedAt,
                 CompletedAt = t.CompletedAt,
-                PalletId = t.PalletId,
+
+                // Палета из источника
+                PalletId = t.StoragePalletCode ?? t.AllocationPalletCode ?? t.Id,
                 ProductType = t.ProductSku,
-                WeightKg = (decimal)t.WeightKg,
-                WeightCategory = GetWeightCategory(t.WeightKg),
-                ForkliftId = t.ForkliftId,
-                FromZone = t.FromZone,
-                FromSlot = t.FromSlot,
-                ToZone = t.ToZone,
-                ToSlot = t.ToSlot,
-                DistanceMeters = (decimal?)t.DistanceMeters,
+
+                // Вес пока не приходит, рассчитаем позже из справочника
+                WeightKg = 0,
+                WeightCategory = "Unknown",
+
+                // Исполнитель (карщик/сборщик)
+                ForkliftId = t.AssigneeCode,
+
+                // Источник (Storage) - извлекаем зону из кода ячейки
+                FromZone = ExtractZoneFromBinCode(t.StorageBinCode),
+                FromSlot = t.StorageBinCode,
+
+                // Назначение (Allocation)
+                ToZone = ExtractZoneFromBinCode(t.AllocationBinCode),
+                ToSlot = t.AllocationBinCode,
+
+                // Расстояние рассчитаем позже если нужно
+                DistanceMeters = null,
+
                 Status = GetTaskStatus(t.Status),
-                DurationSec = t.CompletedAt.HasValue && t.StartedAt.HasValue
-                    ? (decimal)(t.CompletedAt.Value - t.StartedAt.Value).TotalSeconds
-                    : null,
-                FailureReason = t.FailureReason
+
+                // Длительность из API или расчёт
+                DurationSec = t.DurationSec.HasValue
+                    ? (decimal)t.DurationSec.Value
+                    : (t.CompletedAt.HasValue && t.StartedAt.HasValue
+                        ? (decimal)(t.CompletedAt.Value - t.StartedAt.Value).TotalSeconds
+                        : null),
+
+                // Дополнительная информация в поле FailureReason
+                FailureReason = t.ActionType != null
+                    ? $"ActionType: {t.ActionType}, Template: {t.TemplateName}"
+                    : null
             }).ToList();
 
             await _repository.SaveTasksBatchAsync(records, ct);
@@ -223,6 +256,53 @@ public class WmsDataSyncService : BackgroundService
 
             OnTasksSynced?.Invoke(allTasks);
         }
+    }
+
+    /// <summary>
+    /// Извлекает код зоны из кода ячейки
+    /// Формат WMS: 01[Zone_Code]-[Aisle]-[Position]-[Shelf]
+    /// Например: "01I-07-052-1" → Zone: "I", Aisle: "07", Position: "052", Shelf: "1"
+    /// </summary>
+    private static string? ExtractZoneFromBinCode(string? binCode)
+    {
+        if (string.IsNullOrEmpty(binCode))
+            return null;
+
+        // Формат: 01X-AA-PPP-S где X=Zone, AA=Aisle, PPP=Position, S=Shelf
+        // Примеры: 01I-07-052-1 → Zone=I, 01D-01-029-1 → Zone=D, 01A-04-069-5 → Zone=A
+
+        // Первая часть до дефиса содержит "01" + Zone_Code
+        var parts = binCode.Split('-');
+        if (parts.Length > 0 && parts[0].Length >= 3)
+        {
+            // Извлекаем всё после "01" как код зоны
+            var firstPart = parts[0];
+            if (firstPart.StartsWith("01"))
+            {
+                return firstPart.Substring(2); // "01I" → "I", "01D" → "D"
+            }
+        }
+
+        return parts.Length > 0 ? parts[0] : binCode;
+    }
+
+    /// <summary>
+    /// Парсит код ячейки в структурированный вид
+    /// </summary>
+    private static (string? Zone, string? Aisle, string? Position, string? Shelf) ParseBinCode(string? binCode)
+    {
+        if (string.IsNullOrEmpty(binCode))
+            return (null, null, null, null);
+
+        var parts = binCode.Split('-');
+        if (parts.Length < 4)
+            return (ExtractZoneFromBinCode(binCode), null, null, null);
+
+        var zone = parts[0].Length >= 3 && parts[0].StartsWith("01")
+            ? parts[0].Substring(2)
+            : parts[0];
+
+        return (zone, parts[1], parts[2], parts[3]);
     }
 
     /// <summary>

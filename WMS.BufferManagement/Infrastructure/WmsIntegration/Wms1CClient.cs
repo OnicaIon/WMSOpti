@@ -35,78 +35,90 @@ public class PagedResponse<T>
 }
 
 /// <summary>
-/// Запись задания из WMS
+/// Запись задания из WMS (документ "Task action" / "Действие задания")
+/// Соответствует структуре документа в 1С WMS AURORA PROD
 /// </summary>
 public class WmsTaskRecord
 {
+    /// <summary>Номер документа</summary>
     [JsonPropertyName("id")]
     public string Id { get; set; } = string.Empty;
 
+    /// <summary>UUID действия (ActionId)</summary>
+    [JsonPropertyName("actionId")]
+    public string? ActionId { get; set; }
+
+    /// <summary>UUID плана действия (PlanActionId)</summary>
+    [JsonPropertyName("planActionId")]
+    public string? PlanActionId { get; set; }
+
+    /// <summary>Дата создания документа</summary>
     [JsonPropertyName("createdAt")]
     public DateTime CreatedAt { get; set; }
 
-    [JsonPropertyName("modifiedAt")]
-    public DateTime? ModifiedAt { get; set; }
-
+    /// <summary>Время начала выполнения (StartedAt)</summary>
     [JsonPropertyName("startedAt")]
     public DateTime? StartedAt { get; set; }
 
+    /// <summary>Время завершения (CompletedAt)</summary>
     [JsonPropertyName("completedAt")]
     public DateTime? CompletedAt { get; set; }
 
-    [JsonPropertyName("status")]
-    public int Status { get; set; }
+    /// <summary>Длительность выполнения в секундах</summary>
+    [JsonPropertyName("durationSec")]
+    public double? DurationSec { get; set; }
 
-    [JsonPropertyName("palletId")]
-    public string PalletId { get; set; } = string.Empty;
+    /// <summary>Номер основания задания (Task basis)</summary>
+    [JsonPropertyName("taskBasisNumber")]
+    public string? TaskBasisNumber { get; set; }
 
+    /// <summary>Название шаблона действия (Template)</summary>
+    [JsonPropertyName("templateName")]
+    public string? TemplateName { get; set; }
+
+    /// <summary>Тип действия (Action type): PUT_INTO, TAKE_FROM и т.д.</summary>
+    [JsonPropertyName("actionType")]
+    public string? ActionType { get; set; }
+
+    /// <summary>Ячейка хранения - источник (Storage bin)</summary>
+    [JsonPropertyName("storageBinCode")]
+    public string? StorageBinCode { get; set; }
+
+    /// <summary>Палета хранения - источник (Storage pallet)</summary>
+    [JsonPropertyName("storagePalletCode")]
+    public string? StoragePalletCode { get; set; }
+
+    /// <summary>SKU товара (Storage product)</summary>
     [JsonPropertyName("productSku")]
     public string? ProductSku { get; set; }
 
+    /// <summary>Наименование товара (Storage product)</summary>
     [JsonPropertyName("productName")]
     public string? ProductName { get; set; }
 
-    [JsonPropertyName("quantity")]
-    public int Quantity { get; set; }
+    /// <summary>Количество (Qty)</summary>
+    [JsonPropertyName("qty")]
+    public double Qty { get; set; }
 
-    [JsonPropertyName("weightKg")]
-    public double WeightKg { get; set; }
+    /// <summary>Ячейка размещения - назначение (Allocation bin)</summary>
+    [JsonPropertyName("allocationBinCode")]
+    public string? AllocationBinCode { get; set; }
 
-    [JsonPropertyName("forkliftId")]
-    public string? ForkliftId { get; set; }
+    /// <summary>Палета размещения - назначение (Allocation pallet)</summary>
+    [JsonPropertyName("allocationPalletCode")]
+    public string? AllocationPalletCode { get; set; }
 
-    [JsonPropertyName("forkliftOperator")]
-    public string? ForkliftOperator { get; set; }
+    /// <summary>Код исполнителя (Assignee)</summary>
+    [JsonPropertyName("assigneeCode")]
+    public string? AssigneeCode { get; set; }
 
-    [JsonPropertyName("fromZone")]
-    public string? FromZone { get; set; }
+    /// <summary>Имя исполнителя (Assignee)</summary>
+    [JsonPropertyName("assigneeName")]
+    public string? AssigneeName { get; set; }
 
-    [JsonPropertyName("fromSlot")]
-    public string? FromSlot { get; set; }
-
-    [JsonPropertyName("fromX")]
-    public double? FromX { get; set; }
-
-    [JsonPropertyName("fromY")]
-    public double? FromY { get; set; }
-
-    [JsonPropertyName("toZone")]
-    public string? ToZone { get; set; }
-
-    [JsonPropertyName("toSlot")]
-    public string? ToSlot { get; set; }
-
-    [JsonPropertyName("toX")]
-    public double? ToX { get; set; }
-
-    [JsonPropertyName("toY")]
-    public double? ToY { get; set; }
-
-    [JsonPropertyName("distanceMeters")]
-    public double? DistanceMeters { get; set; }
-
-    [JsonPropertyName("failureReason")]
-    public string? FailureReason { get; set; }
+    /// <summary>Статус: 0=New, 2=InProgress, 3=Completed</summary>
+    [JsonPropertyName("status")]
+    public int Status { get; set; }
 }
 
 /// <summary>
@@ -282,6 +294,108 @@ public interface IWms1CClient
     Task<PagedResponse<WmsBufferSnapshotRecord>> GetBufferSnapshotsAsync(string? afterId = null, DateTime? fromTime = null, CancellationToken ct = default);
     Task<string> CreateTaskAsync(CreateTaskRequest request, CancellationToken ct = default);
     Task UpdateTaskStatusAsync(string taskId, int status, string? failureReason = null, CancellationToken ct = default);
+
+    // Справочники
+    Task<PagedResponse<WmsWorkerRecord>> GetWorkersAsync(string? afterId = null, string? group = null, CancellationToken ct = default);
+    Task<PagedResponse<WmsCellRecord>> GetCellsAsync(string? afterId = null, string? zoneCode = null, CancellationToken ct = default);
+    Task<PagedResponse<WmsZoneRecord>> GetZonesAsync(CancellationToken ct = default);
+    Task<WmsStatistics?> GetStatisticsAsync(CancellationToken ct = default);
+}
+
+/// <summary>
+/// Работник WMS (Mobile terminal user)
+/// </summary>
+public class WmsWorkerRecord
+{
+    [JsonPropertyName("code")]
+    public string Code { get; set; } = string.Empty;
+
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = string.Empty;
+
+    [JsonPropertyName("barcode")]
+    public string? Barcode { get; set; }
+
+    [JsonPropertyName("cellCode")]
+    public string? CellCode { get; set; }
+
+    [JsonPropertyName("groupName")]
+    public string? GroupName { get; set; }
+}
+
+/// <summary>
+/// Ячейка склада
+/// </summary>
+public class WmsCellRecord
+{
+    [JsonPropertyName("code")]
+    public string Code { get; set; } = string.Empty;
+
+    [JsonPropertyName("barcode")]
+    public string? Barcode { get; set; }
+
+    [JsonPropertyName("zoneCode")]
+    public string? ZoneCode { get; set; }
+
+    [JsonPropertyName("zoneName")]
+    public string? ZoneName { get; set; }
+
+    [JsonPropertyName("zoneType")]
+    public string? ZoneType { get; set; }
+
+    [JsonPropertyName("aisle")]
+    public string? Aisle { get; set; }
+
+    [JsonPropertyName("rack")]
+    public string? Rack { get; set; }
+
+    [JsonPropertyName("shelf")]
+    public string? Shelf { get; set; }
+
+    [JsonPropertyName("position")]
+    public string? Position { get; set; }
+
+    [JsonPropertyName("cellType")]
+    public string? CellType { get; set; }
+
+    [JsonPropertyName("disabled")]
+    public bool Disabled { get; set; }
+}
+
+/// <summary>
+/// Зона склада
+/// </summary>
+public class WmsZoneRecord
+{
+    [JsonPropertyName("code")]
+    public string Code { get; set; } = string.Empty;
+
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = string.Empty;
+
+    [JsonPropertyName("locationName")]
+    public string? LocationName { get; set; }
+
+    [JsonPropertyName("zoneType")]
+    public string? ZoneType { get; set; }
+
+    [JsonPropertyName("indexNumber")]
+    public int IndexNumber { get; set; }
+}
+
+/// <summary>
+/// Статистика WMS
+/// </summary>
+public class WmsStatistics
+{
+    [JsonPropertyName("date")]
+    public DateTime Date { get; set; }
+
+    [JsonPropertyName("total")]
+    public int Total { get; set; }
+
+    [JsonPropertyName("byStatus")]
+    public Dictionary<string, int> ByStatus { get; set; } = new();
 }
 
 public class CreateTaskRequest
@@ -441,6 +555,42 @@ public class Wms1CClient : IWms1CClient
 
         var response = await _http.PutAsJsonAsync($"tasks/{taskId}/status", payload, _jsonOptions, ct);
         response.EnsureSuccessStatusCode();
+    }
+
+    public async Task<PagedResponse<WmsWorkerRecord>> GetWorkersAsync(
+        string? afterId = null,
+        string? group = null,
+        CancellationToken ct = default)
+    {
+        var url = BuildUrl("workers", afterId);
+        if (!string.IsNullOrEmpty(group))
+        {
+            url += $"&group={Uri.EscapeDataString(group)}";
+        }
+        return await GetAsync<PagedResponse<WmsWorkerRecord>>(url, ct) ?? new PagedResponse<WmsWorkerRecord>();
+    }
+
+    public async Task<PagedResponse<WmsCellRecord>> GetCellsAsync(
+        string? afterId = null,
+        string? zoneCode = null,
+        CancellationToken ct = default)
+    {
+        var url = BuildUrl("cells", afterId);
+        if (!string.IsNullOrEmpty(zoneCode))
+        {
+            url += $"&zone={Uri.EscapeDataString(zoneCode)}";
+        }
+        return await GetAsync<PagedResponse<WmsCellRecord>>(url, ct) ?? new PagedResponse<WmsCellRecord>();
+    }
+
+    public async Task<PagedResponse<WmsZoneRecord>> GetZonesAsync(CancellationToken ct = default)
+    {
+        return await GetAsync<PagedResponse<WmsZoneRecord>>("zones", ct) ?? new PagedResponse<WmsZoneRecord>();
+    }
+
+    public async Task<WmsStatistics?> GetStatisticsAsync(CancellationToken ct = default)
+    {
+        return await GetAsync<WmsStatistics>("statistics", ct);
     }
 
     private string BuildUrl(string endpoint, string? afterId = null, int? limit = null)
