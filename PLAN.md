@@ -496,9 +496,397 @@ Target:
 
 ```xml
 <PackageReference Include="NRules" Version="1.0.0" />
+<PackageReference Include="Npgsql" Version="8.0.5" />
 <PackageReference Include="Stateless" Version="5.16.0" />
 <PackageReference Include="Google.OrTools" Version="9.11.4210" />
 <PackageReference Include="Microsoft.ML" Version="3.0.1" />
 <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
 <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="8.0.1" />
+<PackageReference Include="System.Reactive" Version="6.0.1" />
+```
+
+---
+
+## Хранилище исторических данных (TimescaleDB)
+
+### Почему TimescaleDB, а не векторная БД
+
+| Требование | Векторная БД (Qdrant) | TimescaleDB | Выбор |
+|------------|----------------------|-------------|-------|
+| 10M+ записей задач | Избыточно | Оптимально | **TimescaleDB** |
+| SQL агрегации | Нет | Да | **TimescaleDB** |
+| Compression | Нет | 10x из коробки | **TimescaleDB** |
+| Retention policy | Вручную | Автоматически | **TimescaleDB** |
+| Временные ряды | Не для этого | Специализирован | **TimescaleDB** |
+| GPU | Не даёт выигрыша при 100K | Не нужен | — |
+
+**Вывод**: Для агрегаций и аналитики по 10M задач TimescaleDB оптимальнее векторной БД.
+
+### Архитектура хранения
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│               Слой исторических данных (TimescaleDB)            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                    TimescaleDB                          │   │
+│  │                                                         │   │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐     │   │
+│  │  │ tasks       │  │ picker_     │  │ buffer_     │     │   │
+│  │  │ (hypertable)│  │ metrics     │  │ snapshots   │     │   │
+│  │  │ 10M+ записей│  │ (hypertable)│  │ (hypertable)│     │   │
+│  │  └─────────────┘  └─────────────┘  └─────────────┘     │   │
+│  │                                                         │   │
+│  │  Фичи TimescaleDB:                                      │   │
+│  │  • Автоматическое партиционирование (chunks по 7 дней)  │   │
+│  │  • Compression после 7 дней (10x сжатие)                │   │
+│  │  • Retention policy (удаление старше 90 дней)           │   │
+│  │  • Continuous aggregates для быстрых отчётов            │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                           │                                     │
+│         ┌─────────────────┼─────────────────┐                   │
+│         │                 │                 │                   │
+│         ▼                 ▼                 ▼                   │
+│    SQL агрегации     Временные окна    ML.NET training          │
+│    AVG, GROUP BY     для predictions   data export              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Схема таблиц
+
+#### 1. `tasks` — история выполненных заданий (10M+)
+
+```sql
+CREATE TABLE tasks (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at      TIMESTAMPTZ NOT NULL,
+    started_at      TIMESTAMPTZ,
+    completed_at    TIMESTAMPTZ,
+
+    -- Палета
+    pallet_id       VARCHAR(50) NOT NULL,
+    product_type    VARCHAR(50),
+    weight_kg       DECIMAL(10,2),
+    weight_category VARCHAR(20),  -- Heavy, Medium, Light
+
+    -- Исполнитель
+    forklift_id     VARCHAR(50),
+
+    -- Маршрут
+    from_zone       VARCHAR(50),
+    from_slot       VARCHAR(50),
+    to_zone         VARCHAR(50),
+    to_slot         VARCHAR(50),
+    distance_meters DECIMAL(10,2),
+
+    -- Результат
+    status          VARCHAR(20) NOT NULL,  -- Completed, Failed, Cancelled
+    duration_sec    DECIMAL(10,2),
+    failure_reason  TEXT
+);
+
+-- Конвертация в hypertable
+SELECT create_hypertable('tasks', 'created_at', chunk_time_interval => INTERVAL '7 days');
+
+-- Индексы для частых запросов
+CREATE INDEX idx_tasks_forklift ON tasks (forklift_id, created_at DESC);
+CREATE INDEX idx_tasks_status ON tasks (status, created_at DESC);
+```
+
+#### 2. `picker_metrics` — метрики сборщиков
+
+```sql
+CREATE TABLE picker_metrics (
+    time            TIMESTAMPTZ NOT NULL,
+    picker_id       VARCHAR(50) NOT NULL,
+
+    consumption_rate DECIMAL(10,2),  -- палет/час
+    items_picked    INT,
+    efficiency      DECIMAL(5,2),    -- % от нормы
+    active          BOOLEAN,
+
+    PRIMARY KEY (time, picker_id)
+);
+
+SELECT create_hypertable('picker_metrics', 'time', chunk_time_interval => INTERVAL '1 day');
+```
+
+#### 3. `buffer_snapshots` — снимки состояния буфера
+
+```sql
+CREATE TABLE buffer_snapshots (
+    time                TIMESTAMPTZ NOT NULL PRIMARY KEY,
+
+    buffer_level        DECIMAL(5,4),  -- 0.0 - 1.0
+    buffer_state        VARCHAR(20),   -- Normal, Low, Critical, Overflow
+    pallets_count       INT,
+
+    active_forklifts    INT,
+    active_pickers      INT,
+
+    consumption_rate    DECIMAL(10,2),  -- палет/час
+    delivery_rate       DECIMAL(10,2),
+
+    queue_length        INT,
+    pending_tasks       INT
+);
+
+SELECT create_hypertable('buffer_snapshots', 'time', chunk_time_interval => INTERVAL '1 day');
+```
+
+### Compression и Retention
+
+```sql
+-- Включить compression для таблиц старше 7 дней
+ALTER TABLE tasks SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'forklift_id'
+);
+SELECT add_compression_policy('tasks', INTERVAL '7 days');
+
+-- Удалять данные старше 90 дней
+SELECT add_retention_policy('tasks', INTERVAL '90 days');
+SELECT add_retention_policy('picker_metrics', INTERVAL '90 days');
+SELECT add_retention_policy('buffer_snapshots', INTERVAL '90 days');
+```
+
+### Continuous Aggregates для ML
+
+```sql
+-- Почасовая статистика сборщиков для ML.NET
+CREATE MATERIALIZED VIEW picker_hourly_stats
+WITH (timescaledb.continuous) AS
+SELECT
+    time_bucket('1 hour', time) AS hour,
+    picker_id,
+    AVG(consumption_rate) AS avg_rate,
+    MAX(consumption_rate) AS max_rate,
+    AVG(efficiency) AS avg_efficiency,
+    COUNT(*) AS samples
+FROM picker_metrics
+GROUP BY hour, picker_id;
+
+-- Обновлять каждые 5 минут
+SELECT add_continuous_aggregate_policy('picker_hourly_stats',
+    start_offset => INTERVAL '1 day',
+    end_offset => INTERVAL '1 hour',
+    schedule_interval => INTERVAL '5 minutes');
+```
+
+### Примеры SQL запросов
+
+```sql
+-- Средняя скорость сборщика по часам (для ML.NET)
+SELECT
+    picker_id,
+    EXTRACT(HOUR FROM hour) AS hour_of_day,
+    AVG(avg_rate) AS avg_consumption_rate
+FROM picker_hourly_stats
+WHERE hour > NOW() - INTERVAL '30 days'
+GROUP BY picker_id, hour_of_day
+ORDER BY picker_id, hour_of_day;
+
+-- Топ медленных маршрутов
+SELECT
+    from_zone,
+    to_zone,
+    AVG(duration_sec) AS avg_duration,
+    COUNT(*) AS task_count
+FROM tasks
+WHERE status = 'Completed' AND created_at > NOW() - INTERVAL '7 days'
+GROUP BY from_zone, to_zone
+ORDER BY avg_duration DESC
+LIMIT 20;
+
+-- Статистика буфера за последний час
+SELECT
+    time_bucket('5 minutes', time) AS bucket,
+    AVG(buffer_level) AS avg_level,
+    MIN(buffer_level) AS min_level,
+    MAX(buffer_level) AS max_level,
+    AVG(consumption_rate) AS avg_consumption
+FROM buffer_snapshots
+WHERE time > NOW() - INTERVAL '1 hour'
+GROUP BY bucket
+ORDER BY bucket;
+```
+
+---
+
+## Интеграция с WMS системой
+
+### Архитектура интеграции
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│               Слой интеграции с WMS                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
+│  │  REST API    │  │   gRPC       │  │   Очередь    │          │
+│  │  Адаптер     │  │   Адаптер    │  │   сообщений  │          │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘          │
+│         │                 │                 │                   │
+│         └─────────────────┼─────────────────┘                   │
+│                           │                                     │
+│                  ┌────────▼────────┐                            │
+│                  │  IWmsAdapter    │                            │
+│                  │  (Интерфейс)    │                            │
+│                  └────────┬────────┘                            │
+│                           │                                     │
+│         ┌─────────────────┼─────────────────┐                   │
+│         │                 │                 │                   │
+│    ┌────▼────┐      ┌─────▼────┐     ┌─────▼────┐              │
+│    │ Сервис  │      │  Сервис  │     │  Сервис  │              │
+│    │ заказов │      │ инвентаря│     │ персонала│              │
+│    └─────────┘      └──────────┘     └──────────┘              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### IWmsAdapter — Главный интерфейс
+
+**Методы для заказов и волн:**
+- `GetActiveOrdersAsync()` — получить активные заказы
+- `GetNextWaveAsync()` — получить следующую волну
+- `ConfirmWaveStartAsync()` / `CompleteWaveAsync()` — управление волнами
+
+**Методы для палет:**
+- `GetStoragePalletsAsync()` — список палет в хранении
+- `ReservePalletAsync()` / `ReleasePalletReservationAsync()` — резервация
+- `ConfirmPalletDeliveryAsync()` — подтверждение доставки в буфер
+- `ConfirmPalletConsumedAsync()` — подтверждение потребления
+
+**Методы для персонала:**
+- `GetActivePickersAsync()` — активные сборщики
+- `GetPickerStatsAsync()` — статистика сборщика
+- `GetForkliftsAsync()` — список карщиков
+- `UpdateForkliftStatusAsync()` — обновление статуса
+
+**Методы для заданий:**
+- `CreateDeliveryTaskAsync()` — создать задание
+- `UpdateTaskStatusAsync()` — обновить статус
+- `GetActiveTasksAsync()` — активные задания
+
+**События:**
+- `IObservable<WmsEvent> Events` — подписка на события WMS
+
+### Необходимые данные от WMS
+
+| Категория | Данные | Частота | Использование |
+|-----------|--------|---------|---------------|
+| **Заказы** | Активные заказы | При изменении | Wave planning |
+| **Палеты** | Список в хранении | Раз в минуту | Assignment |
+| | Позиции | Real-time | Travel time |
+| | Вес и тип товара | При регистрации | Heavy-on-bottom |
+| **Сборщики** | Скорость работы | Раз в 5 сек | Prediction |
+| **Карщики** | Позиции и статусы | Real-time | Dispatcher |
+| **Буфер** | Занятость слотов | Real-time | Buffer control |
+
+---
+
+## Структура файлов (дополнение)
+
+```
+WMS.BufferManagement/
+├── Layers/
+│   └── Historical/
+│       ├── DataCollection/
+│       │   ├── MetricsStore.cs
+│       │   └── HistoricalData.cs
+│       │
+│       ├── Persistence/
+│       │   ├── IHistoricalRepository.cs
+│       │   ├── TimescaleDbRepository.cs
+│       │   └── Models/
+│       │       ├── TaskRecord.cs
+│       │       ├── PickerMetric.cs
+│       │       └── BufferSnapshot.cs
+│       │
+│       └── Prediction/
+│           ├── IPredictor.cs
+│           ├── PickerSpeedPredictor.cs
+│           └── DemandPredictor.cs
+│
+└── Infrastructure/
+    └── WmsIntegration/
+        ├── IWmsAdapter.cs
+        ├── WmsModels.cs
+        ├── RestWmsAdapter.cs
+        └── SimulatedWmsAdapter.cs
+```
+
+---
+
+## Этап 7: Интеграция TimescaleDB и WMS
+
+### Задачи
+
+1. **Настройка TimescaleDB**
+   - Docker Compose с TimescaleDB
+   - Создание hypertables
+   - Настройка compression и retention policies
+
+2. **Реализация IHistoricalRepository**
+   - TimescaleDbRepository с Npgsql
+   - Batch insert для производительности
+   - Методы для ML.NET data export
+
+3. **Continuous Aggregates**
+   - Почасовая статистика сборщиков
+   - Дневные агрегаты для отчётов
+
+4. **WMS Adapter**
+   - IWmsAdapter interface
+   - RestWmsAdapter (для реальной WMS)
+   - SimulatedWmsAdapter (для тестирования)
+
+5. **ML Pipeline**
+   - Экспорт данных из TimescaleDB
+   - Feature engineering из SQL
+   - Обучение моделей ML.NET
+
+### Docker Compose для TimescaleDB
+
+```yaml
+version: '3.8'
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=wms
+      - POSTGRES_PASSWORD=wms_password
+      - POSTGRES_DB=wms_history
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wms -d wms_history"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  timescale_data:
+```
+
+### Конфигурация (дополнение appsettings.json)
+
+```json
+{
+  "Historical": {
+    "Provider": "TimescaleDB",
+    "ConnectionString": "Host=localhost;Port=5432;Database=wms_history;Username=wms;Password=wms_password",
+    "RetentionDays": 90,
+    "ChunkIntervalDays": 7,
+    "CompressionEnabled": true,
+    "CompressionAfterDays": 7
+  },
+  "Wms": {
+    "Adapter": "Simulated",
+    "BaseUrl": "http://wms-api:8080",
+    "PollingIntervalMs": 1000
+  }
+}
 ```
