@@ -9,6 +9,256 @@
 
 **Цель**: обеспечить постоянную подпитку буфера с динамической реакцией на скорость сборщиков и прогнозированием потребностей.
 
+---
+
+## Как работает система
+
+### Общая схема потока данных
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              WMS 1C (AURORA PROD)                           │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
+│  │ Task action │  │   Workers   │  │    Cells    │  │ Distribute-products │ │
+│  │ (задания)   │  │ (работники) │  │  (ячейки)   │  │     (операции)      │ │
+│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └──────────┬──────────┘ │
+└─────────┼────────────────┼────────────────┼────────────────────┼────────────┘
+          │                │                │                    │
+          │  HTTP REST API (polling каждые 5 сек)                │
+          ▼                ▼                ▼                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        WmsDataSyncService (.NET)                            │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │  Инкрементальная загрузка: GET /tasks?after={lastId}&limit=1000       │  │
+│  │  Кэширование: _currentPickers, _currentForklifts, _currentBufferState │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┘
+          │
+          │  Конвертация в доменные модели
+          ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         RealTimeDataProvider                                │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │  Расчёт метрик в реальном времени:                                    │  │
+│  │  • GetCurrentBufferLevel()     → % заполнения буфера                  │  │
+│  │  • GetCurrentConsumptionRate() → палет/час (скорость сборщиков)       │  │
+│  │  • GetCurrentDeliveryRate()    → палет/час (скорость доставки)        │  │
+│  │  • GetActivePickersCount()     → количество активных сборщиков        │  │
+│  │  • GetActiveForkliftsCount()   → количество активных карщиков         │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┘
+          │
+          │  Данные для алгоритмов
+          ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      BufferManagementService (главный цикл)                 │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │  Цикл каждые 1000мс:                                                  │  │
+│  │  1. Получить данные из RealTimeDataProvider                           │  │
+│  │  2. Обновить HysteresisController                                     │  │
+│  │  3. Определить состояние буфера (Normal/Low/Critical)                 │  │
+│  │  4. Рассчитать необходимую скорость доставки                          │  │
+│  │  5. При Critical → создать задания в WMS                              │  │
+│  │  6. Сохранить снимок в TimescaleDB (каждые 30 сек)                    │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┘
+          │                                           │
+          │  Снимки состояния                         │  Команды
+          ▼                                           ▼
+┌─────────────────────────┐              ┌─────────────────────────┐
+│      TimescaleDB        │              │       WMS 1C API        │
+│  ┌───────────────────┐  │              │  ┌───────────────────┐  │
+│  │ buffer_snapshots  │  │              │  │ POST /tasks       │  │
+│  │ task_records      │  │              │  │ (создание заданий)│  │
+│  │ picker_metrics    │  │              │  └───────────────────┘  │
+│  └───────────────────┘  │              └─────────────────────────┘
+└─────────────────────────┘
+```
+
+---
+
+### 1. Откуда берём данные (ИСТОЧНИКИ)
+
+#### WMS 1C HTTP API (docs/1C_HTTPService_Module.bsl)
+
+| Эндпоинт | Данные | Интервал | Назначение |
+|----------|--------|----------|------------|
+| `GET /tasks?after={id}` | Выполненные задания (Task action) | 5 сек | Анализ производительности |
+| `GET /workers` | Список работников | 30 сек | Кто выполняет задания |
+| `GET /cells?zone={code}` | Ячейки склада | При старте | Справочник локаций |
+| `GET /zones` | Зоны склада | При старте | Типы зон |
+| `GET /buffer` | Текущее состояние буфера | 5 сек | Уровень заполнения |
+| `GET /statistics` | Статистика за день | 60 сек | KPI мониторинг |
+
+#### Структура документа Task action (из WMS)
+
+```
+Поле в 1С               → Поле в C#              → Использование
+─────────────────────────────────────────────────────────────────
+Number                  → Id                     → Уникальный идентификатор
+ActionId                → ActionId               → UUID действия
+Date                    → CreatedAt              → Время создания
+StartedAt               → StartedAt              → Начало выполнения
+CompletedAt             → CompletedAt            → Завершение
+StorageBin (01I-07-052-1) → FromSlot            → Откуда взяли (источник)
+AllocationBin (01D-01-029-1) → ToSlot           → Куда положили (назначение)
+StoragePallet           → StoragePalletCode     → Код палеты
+StorageProduct          → ProductName/ProductSku → Товар
+Qty                     → Qty                    → Количество
+Assignee                → AssigneeCode/Name     → Кто выполнил
+ActionType              → ActionType             → Тип: PUT_INTO, TAKE_FROM
+```
+
+#### Парсинг кода ячейки
+
+```
+Формат: 01[Zone_Code]-[Aisle]-[Position]-[Shelf]
+
+Пример: 01I-07-052-1
+        ││ │  │   └── Shelf: 1
+        ││ │  └────── Position: 052
+        ││ └───────── Aisle: 07
+        │└──────────── Zone: I (Inbound distribution)
+        └───────────── Prefix: 01 (склад)
+```
+
+---
+
+### 2. Что делаем с данными (ОБРАБОТКА)
+
+#### WmsDataSyncService — синхронизация
+
+```csharp
+// Инкрементальная загрузка (только новые записи)
+while (true) {
+    var response = await _wmsClient.GetTasksAsync(afterId: _state.LastTaskId);
+    if (response.Items.Count == 0) break;
+
+    // Конвертация WMS → TimescaleDB модель
+    var records = response.Items.Select(t => new TaskRecord {
+        Id = Guid.Parse(t.ActionId),
+        FromSlot = t.StorageBinCode,      // 01I-07-052-1
+        ToSlot = t.AllocationBinCode,     // 01D-01-029-1
+        FromZone = ExtractZone(t.StorageBinCode),    // "I"
+        ToZone = ExtractZone(t.AllocationBinCode),   // "D"
+        DurationSec = t.DurationSec,
+        ...
+    });
+
+    await _repository.SaveTasksBatchAsync(records);
+    _state.LastTaskId = response.LastId;
+}
+```
+
+#### RealTimeDataProvider — расчёт метрик
+
+```csharp
+// Скорость потребления = завершённые задания за последние 5 минут × 12
+public double GetCurrentConsumptionRate() {
+    var recentTasks = _syncService.GetRecentCompletedTasks(TimeSpan.FromMinutes(5));
+    var palletsConsumed = recentTasks.Count(t => t.ActionType == "PUT_INTO");
+    return palletsConsumed * 12; // экстраполяция на час
+}
+```
+
+#### HysteresisController — управление состоянием
+
+```csharp
+// Определение состояния буфера с гистерезисом
+public void Update(BufferZone buffer, double consumptionRate) {
+    var level = buffer.FillLevel;
+
+    // Переходы с учётом DeadBand (5%) для предотвращения осцилляций
+    if (level < CriticalThreshold)             // < 15%
+        _state = BufferState.Critical;
+    else if (level < LowThreshold - DeadBand)  // < 25%
+        _state = BufferState.Low;
+    else if (level > HighThreshold + DeadBand) // > 75%
+        _state = BufferState.Overflow;
+    else if (level > LowThreshold + DeadBand)  // > 35%
+        _state = BufferState.Normal;
+}
+```
+
+---
+
+### 3. Как реагируем (РЕАКЦИИ)
+
+| Состояние | Уровень | Реакция | Множитель доставки |
+|-----------|---------|---------|-------------------|
+| **Critical** | < 15% | СРОЧНО: все карщики на подачу, создание заданий в WMS | 2.0x |
+| **Low** | 15-30% | Активировать дополнительного карщика | 1.5x |
+| **Normal** | 30-70% | Поддерживать текущий темп | 1.0x |
+| **Overflow** | > 70% | Снизить интенсивность | 0.5x |
+
+#### Автоматическое создание заданий в WMS
+
+```csharp
+if (_settings.UseRealData && _controller.CurrentState == BufferState.Critical) {
+    var palletsToRequest = _controller.GetPalletsToRequest();
+    for (int i = 0; i < palletsToRequest; i++) {
+        await _wmsClient.CreateTaskAsync(new CreateTaskRequest {
+            PalletId = $"AUTO-{DateTime.UtcNow.Ticks}-{i}",
+            FromZone = "STORAGE",
+            ToZone = "BUFFER",
+            Priority = 3  // Высокий приоритет
+        });
+    }
+}
+```
+
+---
+
+### 4. Куда пишем данные (ВЫХОДЫ)
+
+| Назначение | Данные | Частота |
+|------------|--------|---------|
+| **TimescaleDB** `buffer_snapshots` | Снимки состояния буфера | 30 сек |
+| **TimescaleDB** `task_records` | Выполненные задания | При синхронизации |
+| **TimescaleDB** `picker_metrics` | Метрики сборщиков | При событии |
+| **WMS 1C** `POST /tasks` | Новые задания на подачу | При Critical |
+| **Консоль** | Live статус | 10 сек |
+
+---
+
+### 5. Цикл работы программы
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    ГЛАВНЫЙ ЦИКЛ (каждые 1 сек)                  │
+├─────────────────────────────────────────────────────────────────┤
+│  1. ЧТЕНИЕ: Получить данные из RealTimeDataProvider             │
+│     • bufferLevel, consumptionRate, activePickers               │
+│                                                                 │
+│  2. АНАЛИЗ: Обновить контроллер гистерезиса                     │
+│     • Определить состояние: Normal/Low/Critical/Overflow        │
+│                                                                 │
+│  3. РЕШЕНИЕ: Рассчитать требуемые действия                      │
+│     • requiredRate, palletsToRequest, recommendedForklifts      │
+│                                                                 │
+│  4. ДЕЙСТВИЕ: При Critical → CreateDeliveryTasksAsync() → WMS   │
+│                                                                 │
+│  5. ЗАПИСЬ: Каждые 30 сек → SaveBufferSnapshotAsync() → DB      │
+│                                                                 │
+│  6. ЛОГИРОВАНИЕ: При смене состояния → Log + Event              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### 6. Фоновые процессы
+
+| Сервис | Интервал | Задача |
+|--------|----------|--------|
+| `WmsDataSyncService` | 5 сек | Синхронизация заданий из WMS |
+| `WmsDataSyncService` | 30 сек | Синхронизация сборщиков |
+| `BufferManagementService` | 1 сек | Главный цикл управления |
+| `BufferManagementService` | 30 сек | Сохранение снимков в БД |
+| `AggregationService` | 5 мин | Расчёт агрегатов для ML |
+| `StatsReportingService` | 10 сек | Обновление консоли |
+
+---
+
 ### Дополнительные требования:
 
 1. **Weight Priority (Heavy-on-Bottom Rule)**
