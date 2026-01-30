@@ -894,6 +894,602 @@ X-Timestamp: <iso8601_timestamp>
 
 ---
 
+## Исторические данные (для ML и аналитики)
+
+Эти endpoints предоставляют исторические данные для обучения ML моделей и аналитики. Данные экспортируются в систему Buffer Management для хранения в TimescaleDB.
+
+### Структуры исторических данных
+
+#### История заданий (TaskHistory)
+
+```json
+{
+  "id": "TASK-2024-000001",
+  "createdAt": "2024-01-15T10:30:00Z",
+  "startedAt": "2024-01-15T10:31:00Z",
+  "completedAt": "2024-01-15T10:35:00Z",
+  "palletId": "PAL-001",
+  "productType": "SKU-001",
+  "productName": "Товар 1",
+  "weightKg": 250.5,
+  "weightCategory": 2,
+  "forkliftId": "FORK-001",
+  "fromZone": "STORAGE-A",
+  "fromSlot": "A-01-02-03",
+  "toZone": "BUFFER",
+  "toSlot": "BUF-01",
+  "distanceMeters": 45.5,
+  "status": 3,
+  "durationSec": 240.0,
+  "failureReason": null
+}
+```
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `id` | `string` | ID задания |
+| `createdAt` | `datetime` | Время создания |
+| `startedAt` | `datetime` | Время начала выполнения |
+| `completedAt` | `datetime` | Время завершения |
+| `palletId` | `string` | ID палеты |
+| `productType` | `string` | Артикул товара |
+| `productName` | `string` | Наименование товара |
+| `weightKg` | `number` | Вес палеты (кг) |
+| `weightCategory` | `int` | Категория веса (0-2) |
+| `forkliftId` | `string` | ID карщика |
+| `fromZone` | `string` | Зона отправления |
+| `fromSlot` | `string` | Ячейка отправления |
+| `toZone` | `string` | Зона назначения |
+| `toSlot` | `string` | Ячейка назначения |
+| `distanceMeters` | `number` | Пройденное расстояние (м) |
+| `status` | `int` | Финальный статус |
+| `durationSec` | `number` | Длительность выполнения (сек) |
+| `failureReason` | `string` | Причина ошибки (если есть) |
+
+#### Метрики сборщика (PickerMetricHistory)
+
+```json
+{
+  "time": "2024-01-15T10:30:00Z",
+  "pickerId": "EMP-001",
+  "consumptionRate": 5.5,
+  "itemsPicked": 45,
+  "efficiency": 95.2,
+  "active": true
+}
+```
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `time` | `datetime` | Временная метка |
+| `pickerId` | `string` | Табельный номер сборщика |
+| `consumptionRate` | `number` | Скорость потребления палет (палет/час) |
+| `itemsPicked` | `int` | Собрано единиц товара за интервал |
+| `efficiency` | `number` | Эффективность (% от нормы) |
+| `active` | `bool` | Активен ли сборщик |
+
+#### Снимок буфера (BufferSnapshotHistory)
+
+```json
+{
+  "time": "2024-01-15T10:30:00Z",
+  "bufferLevel": 0.65,
+  "bufferState": "Normal",
+  "palletsCount": 32,
+  "activeForklifts": 3,
+  "activePickers": 18,
+  "consumptionRate": 180.5,
+  "deliveryRate": 175.0,
+  "queueLength": 5,
+  "pendingTasks": 8
+}
+```
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `time` | `datetime` | Временная метка |
+| `bufferLevel` | `number` | Уровень заполнения (0.0-1.0) |
+| `bufferState` | `string` | Состояние: Normal, Low, Critical, Overflow |
+| `palletsCount` | `int` | Количество палет в буфере |
+| `activeForklifts` | `int` | Активных карщиков |
+| `activePickers` | `int` | Активных сборщиков |
+| `consumptionRate` | `number` | Скорость потребления (палет/час) |
+| `deliveryRate` | `number` | Скорость доставки (палет/час) |
+| `queueLength` | `int` | Длина очереди заданий |
+| `pendingTasks` | `int` | Ожидающих заданий |
+
+---
+
+### API Endpoints для исторических данных
+
+#### `GET /history/tasks`
+
+Получить историю выполненных заданий.
+
+**Параметры запроса:**
+
+| Параметр | Тип | Обязательный | Описание |
+|----------|-----|--------------|----------|
+| `fromTime` | `datetime` | Да | Начало периода |
+| `toTime` | `datetime` | Да | Конец периода |
+| `forkliftId` | `string` | Нет | Фильтр по карщику |
+| `status` | `int` | Нет | Фильтр по статусу (3=Completed, 4=Failed) |
+| `limit` | `int` | Нет | Максимум записей (по умолчанию 1000) |
+| `offset` | `int` | Нет | Смещение для пагинации |
+
+**Пример запроса:**
+```http
+GET /wms/hs/buffer-api/v1/history/tasks?fromTime=2024-01-01T00:00:00Z&toTime=2024-01-15T23:59:59Z&limit=500
+X-API-Key: your-api-key
+```
+
+**Ответ (200 OK):**
+```json
+{
+  "items": [
+    {
+      "id": "TASK-001",
+      "createdAt": "2024-01-15T10:30:00Z",
+      "startedAt": "2024-01-15T10:31:00Z",
+      "completedAt": "2024-01-15T10:35:00Z",
+      "palletId": "PAL-001",
+      "productType": "SKU-001",
+      "productName": "Товар 1",
+      "weightKg": 250.5,
+      "weightCategory": 2,
+      "forkliftId": "FORK-001",
+      "fromZone": "STORAGE-A",
+      "fromSlot": "A-01-02-03",
+      "toZone": "BUFFER",
+      "toSlot": "BUF-01",
+      "distanceMeters": 45.5,
+      "status": 3,
+      "durationSec": 240.0,
+      "failureReason": null
+    }
+  ],
+  "total": 15420,
+  "hasMore": true
+}
+```
+
+#### `GET /history/tasks/stats`
+
+Получить агрегированную статистику заданий по карщикам.
+
+**Параметры запроса:**
+
+| Параметр | Тип | Обязательный | Описание |
+|----------|-----|--------------|----------|
+| `fromTime` | `datetime` | Да | Начало периода |
+| `toTime` | `datetime` | Да | Конец периода |
+
+**Ответ (200 OK):**
+```json
+{
+  "items": [
+    {
+      "forkliftId": "FORK-001",
+      "totalTasks": 150,
+      "completedTasks": 145,
+      "failedTasks": 5,
+      "avgDurationSec": 185.5,
+      "totalDistanceMeters": 12500.0
+    },
+    {
+      "forkliftId": "FORK-002",
+      "totalTasks": 142,
+      "completedTasks": 140,
+      "failedTasks": 2,
+      "avgDurationSec": 192.3,
+      "totalDistanceMeters": 11800.0
+    }
+  ]
+}
+```
+
+#### `GET /history/tasks/routes`
+
+Получить топ медленных маршрутов для оптимизации.
+
+**Параметры запроса:**
+
+| Параметр | Тип | Обязательный | Описание |
+|----------|-----|--------------|----------|
+| `lastDays` | `int` | Нет | Количество дней (по умолчанию 7) |
+| `limit` | `int` | Нет | Количество маршрутов (по умолчанию 20) |
+
+**Ответ (200 OK):**
+```json
+{
+  "items": [
+    {
+      "fromZone": "STORAGE-C",
+      "toZone": "BUFFER",
+      "avgDurationSec": 320.5,
+      "taskCount": 85
+    },
+    {
+      "fromZone": "STORAGE-B",
+      "toZone": "BUFFER",
+      "avgDurationSec": 280.2,
+      "taskCount": 120
+    }
+  ]
+}
+```
+
+---
+
+#### `GET /history/pickers`
+
+Получить историю метрик сборщиков.
+
+**Параметры запроса:**
+
+| Параметр | Тип | Обязательный | Описание |
+|----------|-----|--------------|----------|
+| `fromTime` | `datetime` | Да | Начало периода |
+| `toTime` | `datetime` | Да | Конец периода |
+| `pickerId` | `string` | Нет | Фильтр по сборщику |
+| `interval` | `string` | Нет | Интервал агрегации: `raw`, `1m`, `5m`, `1h` (по умолчанию `5m`) |
+| `limit` | `int` | Нет | Максимум записей |
+
+**Пример запроса:**
+```http
+GET /wms/hs/buffer-api/v1/history/pickers?fromTime=2024-01-15T08:00:00Z&toTime=2024-01-15T20:00:00Z&interval=5m
+```
+
+**Ответ (200 OK):**
+```json
+{
+  "items": [
+    {
+      "time": "2024-01-15T10:30:00Z",
+      "pickerId": "EMP-001",
+      "consumptionRate": 5.5,
+      "itemsPicked": 45,
+      "efficiency": 95.2,
+      "active": true
+    }
+  ],
+  "total": 2880,
+  "hasMore": false
+}
+```
+
+#### `GET /history/pickers/{pickerId}/hourly`
+
+Получить почасовую статистику конкретного сборщика.
+
+**Параметры запроса:**
+
+| Параметр | Тип | Обязательный | Описание |
+|----------|-----|--------------|----------|
+| `fromTime` | `datetime` | Да | Начало периода |
+| `toTime` | `datetime` | Да | Конец периода |
+
+**Ответ (200 OK):**
+```json
+{
+  "pickerId": "EMP-001",
+  "items": [
+    {
+      "hour": "2024-01-15T08:00:00Z",
+      "avgRate": 5.2,
+      "maxRate": 6.8,
+      "avgEfficiency": 92.5,
+      "samples": 12
+    },
+    {
+      "hour": "2024-01-15T09:00:00Z",
+      "avgRate": 5.8,
+      "maxRate": 7.2,
+      "avgEfficiency": 98.3,
+      "samples": 12
+    }
+  ]
+}
+```
+
+#### `GET /history/pickers/patterns`
+
+Получить паттерны скорости сборщиков по часам дня (для ML).
+
+**Параметры запроса:**
+
+| Параметр | Тип | Обязательный | Описание |
+|----------|-----|--------------|----------|
+| `lastDays` | `int` | Нет | Количество дней для анализа (по умолчанию 30) |
+
+**Ответ (200 OK):**
+```json
+{
+  "items": [
+    {
+      "pickerId": "EMP-001",
+      "hourOfDay": 8,
+      "avgConsumptionRate": 4.5,
+      "avgEfficiency": 85.0,
+      "sampleCount": 22
+    },
+    {
+      "pickerId": "EMP-001",
+      "hourOfDay": 9,
+      "avgConsumptionRate": 5.8,
+      "avgEfficiency": 98.5,
+      "sampleCount": 25
+    }
+  ]
+}
+```
+
+---
+
+#### `GET /history/buffer`
+
+Получить историю состояния буфера.
+
+**Параметры запроса:**
+
+| Параметр | Тип | Обязательный | Описание |
+|----------|-----|--------------|----------|
+| `fromTime` | `datetime` | Да | Начало периода |
+| `toTime` | `datetime` | Да | Конец периода |
+| `interval` | `string` | Нет | Интервал: `raw`, `1m`, `5m`, `15m`, `1h` (по умолчанию `5m`) |
+
+**Пример запроса:**
+```http
+GET /wms/hs/buffer-api/v1/history/buffer?fromTime=2024-01-15T00:00:00Z&toTime=2024-01-15T23:59:59Z&interval=15m
+```
+
+**Ответ (200 OK):**
+```json
+{
+  "items": [
+    {
+      "time": "2024-01-15T10:30:00Z",
+      "bufferLevel": 0.65,
+      "bufferState": "Normal",
+      "palletsCount": 32,
+      "activeForklifts": 3,
+      "activePickers": 18,
+      "consumptionRate": 180.5,
+      "deliveryRate": 175.0,
+      "queueLength": 5,
+      "pendingTasks": 8
+    }
+  ],
+  "total": 96,
+  "hasMore": false
+}
+```
+
+#### `GET /history/buffer/stats`
+
+Получить агрегированную статистику буфера за период.
+
+**Параметры запроса:**
+
+| Параметр | Тип | Обязательный | Описание |
+|----------|-----|--------------|----------|
+| `fromTime` | `datetime` | Да | Начало периода |
+| `toTime` | `datetime` | Да | Конец периода |
+
+**Ответ (200 OK):**
+```json
+{
+  "periodStart": "2024-01-15T00:00:00Z",
+  "periodEnd": "2024-01-15T23:59:59Z",
+  "avgLevel": 0.58,
+  "minLevel": 0.15,
+  "maxLevel": 0.85,
+  "avgConsumption": 175.5,
+  "avgDelivery": 178.2,
+  "criticalCount": 3
+}
+```
+
+---
+
+### Экспорт данных для ML обучения
+
+#### `GET /history/export/picker-speed`
+
+Экспорт данных для обучения модели прогноза скорости сборщиков.
+
+**Параметры запроса:**
+
+| Параметр | Тип | Обязательный | Описание |
+|----------|-----|--------------|----------|
+| `lastDays` | `int` | Нет | Количество дней (по умолчанию 30) |
+| `format` | `string` | Нет | Формат: `json` (по умолчанию), `csv` |
+
+**Ответ (200 OK):**
+```json
+{
+  "items": [
+    {
+      "pickerId": "EMP-001",
+      "hourOfDay": 10,
+      "dayOfWeek": 1,
+      "avgSpeedLast7Days": 5.2,
+      "avgSpeedSameHour": 5.5,
+      "speed": 5.8
+    }
+  ],
+  "rowCount": 15000,
+  "exportedAt": "2024-01-15T12:00:00Z"
+}
+```
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `pickerId` | `string` | ID сборщика |
+| `hourOfDay` | `int` | Час дня (0-23) |
+| `dayOfWeek` | `int` | День недели (0=Пн, 6=Вс) |
+| `avgSpeedLast7Days` | `float` | Средняя скорость за последние 7 дней |
+| `avgSpeedSameHour` | `float` | Средняя скорость в тот же час |
+| `speed` | `float` | **Target**: фактическая скорость (палет/час) |
+
+#### `GET /history/export/demand`
+
+Экспорт данных для обучения модели прогноза спроса буфера.
+
+**Параметры запроса:**
+
+| Параметр | Тип | Обязательный | Описание |
+|----------|-----|--------------|----------|
+| `lastDays` | `int` | Нет | Количество дней (по умолчанию 30) |
+| `format` | `string` | Нет | Формат: `json` (по умолчанию), `csv` |
+
+**Ответ (200 OK):**
+```json
+{
+  "items": [
+    {
+      "hourOfDay": 10,
+      "dayOfWeek": 1,
+      "activePickers": 18,
+      "avgPickerSpeed": 5.5,
+      "bufferLevel": 0.65,
+      "demandNext15Min": 12.5
+    }
+  ],
+  "rowCount": 8500,
+  "exportedAt": "2024-01-15T12:00:00Z"
+}
+```
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `hourOfDay` | `int` | Час дня (0-23) |
+| `dayOfWeek` | `int` | День недели (0=Пн, 6=Вс) |
+| `activePickers` | `int` | Количество активных сборщиков |
+| `avgPickerSpeed` | `float` | Средняя скорость сборщиков |
+| `bufferLevel` | `float` | Уровень буфера (0-1) |
+| `demandNext15Min` | `float` | **Target**: спрос за следующие 15 мин (палет) |
+
+---
+
+### Частота синхронизации исторических данных
+
+| Тип данных | Рекомендуемая частота | Описание |
+|------------|----------------------|----------|
+| История заданий | Каждые 5 минут | Новые завершённые задания |
+| Метрики сборщиков | Каждые 1 минуту | Текущая скорость и эффективность |
+| Снимки буфера | Каждые 30 секунд | Состояние буфера |
+| ML экспорт | Раз в сутки (ночью) | Полный экспорт для переобучения |
+
+### Реализация в 1С — дополнительные шаблоны URL
+
+```
+└── Шаблоны URL (дополнение):
+    ├── /history/tasks (GET)
+    ├── /history/tasks/stats (GET)
+    ├── /history/tasks/routes (GET)
+    ├── /history/pickers (GET)
+    ├── /history/pickers/{pickerId}/hourly (GET)
+    ├── /history/pickers/patterns (GET)
+    ├── /history/buffer (GET)
+    ├── /history/buffer/stats (GET)
+    ├── /history/export/picker-speed (GET)
+    └── /history/export/demand (GET)
+```
+
+### Пример запроса истории в 1С
+
+```bsl
+Функция ПолучитьИсториюЗаданий(Запрос)
+
+    Ответ = Новый HTTPСервисОтвет(200);
+    Ответ.Заголовки.Вставить("Content-Type", "application/json; charset=utf-8");
+
+    НачалоПериода = Дата(Запрос.ПараметрыЗапроса.Получить("fromTime"));
+    КонецПериода = Дата(Запрос.ПараметрыЗапроса.Получить("toTime"));
+    Лимит = Число(Запрос.ПараметрыЗапроса.Получить("limit"));
+    Если Лимит = 0 Тогда Лимит = 1000; КонецЕсли;
+
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ ПЕРВЫЕ &Лимит
+    |   Задания.Ссылка.УникальныйИдентификатор КАК id,
+    |   Задания.ДатаСоздания КАК createdAt,
+    |   Задания.ДатаНачала КАК startedAt,
+    |   Задания.ДатаЗавершения КАК completedAt,
+    |   Задания.Палета.Код КАК palletId,
+    |   Задания.Палета.Номенклатура.Артикул КАК productType,
+    |   Задания.Палета.Номенклатура.Наименование КАК productName,
+    |   Задания.Палета.ВесБрутто КАК weightKg,
+    |   ВЫБОР
+    |       КОГДА Задания.Палета.ВесБрутто >= 20 ТОГДА 2
+    |       КОГДА Задания.Палета.ВесБрутто >= 5 ТОГДА 1
+    |       ИНАЧЕ 0
+    |   КОНЕЦ КАК weightCategory,
+    |   Задания.Карщик.Код КАК forkliftId,
+    |   Задания.ЗонаОтправления.Код КАК fromZone,
+    |   Задания.ЯчейкаОтправления.Код КАК fromSlot,
+    |   Задания.ЗонаНазначения.Код КАК toZone,
+    |   Задания.ЯчейкаНазначения.Код КАК toSlot,
+    |   Задания.Расстояние КАК distanceMeters,
+    |   Задания.Статус КАК status,
+    |   РАЗНОСТЬДАТ(Задания.ДатаНачала, Задания.ДатаЗавершения, СЕКУНДА) КАК durationSec,
+    |   Задания.ПричинаОшибки КАК failureReason
+    |ИЗ
+    |   Документ.ЗаданиеНаПеремещение КАК Задания
+    |ГДЕ
+    |   Задания.ДатаЗавершения >= &НачалоПериода
+    |   И Задания.ДатаЗавершения <= &КонецПериода
+    |   И Задания.Статус В (
+    |       ЗНАЧЕНИЕ(Перечисление.СтатусыЗаданий.Завершено),
+    |       ЗНАЧЕНИЕ(Перечисление.СтатусыЗаданий.Ошибка))
+    |УПОРЯДОЧИТЬ ПО
+    |   Задания.ДатаЗавершения";
+
+    Запрос.УстановитьПараметр("НачалоПериода", НачалоПериода);
+    Запрос.УстановитьПараметр("КонецПериода", КонецПериода);
+    Запрос.УстановитьПараметр("Лимит", Лимит);
+
+    Выборка = Запрос.Выполнить().Выбрать();
+
+    // Формируем JSON массив
+    МассивЗаданий = Новый Массив;
+    Пока Выборка.Следующий() Цикл
+        Задание = Новый Структура;
+        Задание.Вставить("id", Строка(Выборка.id));
+        Задание.Вставить("createdAt", ФорматДатыISO8601(Выборка.createdAt));
+        Задание.Вставить("startedAt", ФорматДатыISO8601(Выборка.startedAt));
+        Задание.Вставить("completedAt", ФорматДатыISO8601(Выборка.completedAt));
+        Задание.Вставить("palletId", Выборка.palletId);
+        Задание.Вставить("productType", Выборка.productType);
+        Задание.Вставить("productName", Выборка.productName);
+        Задание.Вставить("weightKg", Выборка.weightKg);
+        Задание.Вставить("weightCategory", Выборка.weightCategory);
+        Задание.Вставить("forkliftId", Выборка.forkliftId);
+        Задание.Вставить("fromZone", Выборка.fromZone);
+        Задание.Вставить("fromSlot", Выборка.fromSlot);
+        Задание.Вставить("toZone", Выборка.toZone);
+        Задание.Вставить("toSlot", Выборка.toSlot);
+        Задание.Вставить("distanceMeters", Выборка.distanceMeters);
+        Задание.Вставить("status", СтатусВЧисло(Выборка.status));
+        Задание.Вставить("durationSec", Выборка.durationSec);
+        Задание.Вставить("failureReason", Выборка.failureReason);
+        МассивЗаданий.Добавить(Задание);
+    КонецЦикла;
+
+    Результат = Новый Структура;
+    Результат.Вставить("items", МассивЗаданий);
+    Результат.Вставить("total", МассивЗаданий.Количество());
+    Результат.Вставить("hasMore", МассивЗаданий.Количество() = Лимит);
+
+    Ответ.УстановитьТелоИзСтроки(СтруктуруВJSON(Результат));
+    Возврат Ответ;
+
+КонецФункции
+```
+
+---
+
 ## Коды ошибок
 
 | HTTP Код | Описание |
