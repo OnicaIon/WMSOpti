@@ -293,7 +293,7 @@ dotnet run                          # Запуск BufferManagementService
 
 ### 1.7 Презентация
 
-Файл: `docs/WMS_Buffer_Optimization.pptx` (12 слайдов)
+Файл: `docs/WMS_Buffer_Optimization.pptx` (13 слайдов)
 
 Содержание:
 1. Титульный
@@ -301,12 +301,13 @@ dotnet run                          # Запуск BufferManagementService
 3. Почему это важно (потери)
 4. 3 уровня оптимизации
 5. **Умное назначение задач пикерам** (кто лучше справится)
-6. OR-Tools оптимизация (карщики + пикеры)
-7. Цикл оптимизации
-8. Пример до/после
-9. Ожидаемые результаты
-10. План внедрения
-11. Резюме
+6. **Аналитика по товарам** (сложность, типичные количества)
+7. OR-Tools оптимизация (карщики + пикеры)
+8. Цикл оптимизации
+9. Пример до/после
+10. Ожидаемые результаты
+11. План внедрения
+12. Резюме
 
 ---
 
@@ -354,7 +355,59 @@ dotnet run                          # Запуск BufferManagementService
 - `Layers/Tactical/PickerAssignmentOptimizer.cs` — новый класс
 - `Layers/Realtime/PickerStatusTracker.cs` — отслеживание занятости
 
-### 3.2 OR-Tools оптимизация (Tactical Layer)
+### 3.2 Статистика по товарам (Product Analytics)
+
+**Задача:** Понять "сложность" каждого товара для планирования
+
+```
+Метрики по товару (независимо от пикера):
+
+1. Среднее время распределения
+   - avg_distribution_time_sec — сколько в среднем занимает распределение
+   - Позволяет оценить сложность товара
+
+2. Стандартные количества
+   - typical_qty_per_task — типичное количество в задании
+   - min_qty, max_qty, median_qty — диапазон
+   - Для планирования объёма работы
+
+3. Вариативность времени
+   - std_dev_time — насколько стабильно время
+   - Высокая вариативность = сложный товар
+
+4. Частота появления
+   - tasks_per_day — сколько раз в день встречается
+   - Приоритет для оптимизации частых товаров
+```
+
+**SQL для расчёта:**
+```sql
+CREATE TABLE product_statistics (
+    product_code TEXT PRIMARY KEY,
+    product_name TEXT,
+    avg_distribution_time_sec DECIMAL(10,2),
+    median_distribution_time_sec DECIMAL(10,2),
+    std_dev_time_sec DECIMAL(10,2),
+    typical_qty DECIMAL(10,2),
+    min_qty DECIMAL(10,2),
+    max_qty DECIMAL(10,2),
+    tasks_count INTEGER,
+    tasks_per_day DECIMAL(10,2),
+    avg_weight_kg DECIMAL(10,3),
+    updated_at TIMESTAMPTZ
+);
+```
+
+**Использование:**
+- Прогноз времени волны: сумма (кол-во товара × время на единицу)
+- Выявление "проблемных" товаров с высокой вариативностью
+- Планирование буфера: частые товары ближе к выходу
+
+**Файлы для реализации:**
+- `Layers/Historical/Persistence/ProductStatisticsRepository.cs`
+- CLI: `--calc-product-stats`
+
+### 3.3 OR-Tools оптимизация (Tactical Layer)
 
 **Задача:** Минимизация общего времени волны (makespan)
 
@@ -388,7 +441,7 @@ dotnet run                          # Запуск BufferManagementService
 - `Layers/Tactical/PickerAssignmentOptimizer.cs` — новый
 - Нужно: интеграция Google.OrTools CP-SAT solver
 
-### 3.3 Интеграция ML моделей в реальном времени
+### 3.4 Интеграция ML моделей в реальном времени
 
 **Задача:** Использовать обученные модели для прогнозирования
 
@@ -408,7 +461,7 @@ public class MlPredictor
 - `Layers/Historical/Prediction/MlPredictor.cs` — новый класс
 - Интеграция в `BufferManagementService.cs`
 
-### 3.4 Обратная связь WMS → Создание заданий
+### 3.5 Обратная связь WMS → Создание заданий
 
 **Задача:** При Critical состоянии создавать задания в WMS
 
@@ -434,7 +487,7 @@ if (_controller.CurrentState == BufferState.Critical)
 - Реализовать `POST /tasks` в `Wms1CClient.cs`
 - Добавить логику выбора палет для подачи
 
-### 3.5 Мониторинг и алерты
+### 3.6 Мониторинг и алерты
 
 **Задача:** Уведомления при критических ситуациях
 
@@ -442,13 +495,13 @@ if (_controller.CurrentState == BufferState.Critical)
 - Dashboard с метриками (Grafana + TimescaleDB)
 - Логирование в структурированном формате (Serilog)
 
-### 3.6 Тестирование
+### 3.7 Тестирование
 
 - Unit тесты для ML предикторов
 - Integration тесты для WMS синхронизации
 - Load тесты для BufferManagementService
 
-### 3.7 Документация API
+### 3.8 Документация API
 
 - OpenAPI/Swagger для внутреннего API
 - Документация интеграции с 1C
