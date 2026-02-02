@@ -72,9 +72,21 @@ public class WmsTaskRecord
     [JsonPropertyName("taskBasisNumber")]
     public string? TaskBasisNumber { get; set; }
 
+    /// <summary>Код шаблона действия (Template.Code): 029=Forklift, 031=Picker</summary>
+    [JsonPropertyName("templateCode")]
+    public string? TemplateCode { get; set; }
+
     /// <summary>Название шаблона действия (Template)</summary>
     [JsonPropertyName("templateName")]
     public string? TemplateName { get; set; }
+
+    /// <summary>Определяет роль работника по коду шаблона</summary>
+    public string WorkerRole => TemplateCode switch
+    {
+        "029" => "Forklift",  // Distribution replenish
+        "031" => "Picker",    // Put product into the bin
+        _ => "Unknown"
+    };
 
     /// <summary>Тип действия (Action type): PUT_INTO, TAKE_FROM и т.д.</summary>
     [JsonPropertyName("actionType")]
@@ -95,6 +107,14 @@ public class WmsTaskRecord
     /// <summary>Наименование товара (Storage product)</summary>
     [JsonPropertyName("productName")]
     public string? ProductName { get; set; }
+
+    /// <summary>Код товара (из rtProducts)</summary>
+    [JsonPropertyName("productCode")]
+    public string? ProductCode { get; set; }
+
+    /// <summary>Вес единицы товара (кг)</summary>
+    [JsonPropertyName("productWeight")]
+    public double ProductWeight { get; set; }
 
     /// <summary>Количество (Qty)</summary>
     [JsonPropertyName("qty")]
@@ -300,6 +320,16 @@ public interface IWms1CClient
     Task<PagedResponse<WmsCellRecord>> GetCellsAsync(string? afterId = null, string? zoneCode = null, CancellationToken ct = default);
     Task<PagedResponse<WmsZoneRecord>> GetZonesAsync(CancellationToken ct = default);
     Task<WmsStatistics?> GetStatisticsAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Get products catalog (Nomenclature) with weight data for Heavy-on-Bottom rule
+    /// </summary>
+    Task<PagedResponse<WmsProductRecord>> GetProductsAsync(
+        string? afterId = null,
+        string? categoryCode = null,
+        DateTime? modifiedAfter = null,
+        int? limit = null,
+        CancellationToken ct = default);
 }
 
 /// <summary>
@@ -381,6 +411,73 @@ public class WmsZoneRecord
 
     [JsonPropertyName("indexNumber")]
     public int IndexNumber { get; set; }
+}
+
+/// <summary>
+/// Product from WMS (Nomenclature catalog)
+/// Used for Heavy-on-Bottom rule and weight-based optimization
+/// </summary>
+public class WmsProductRecord
+{
+    /// <summary>Internal product code</summary>
+    [JsonPropertyName("code")]
+    public string Code { get; set; } = string.Empty;
+
+    /// <summary>Product SKU</summary>
+    [JsonPropertyName("sku")]
+    public string? Sku { get; set; }
+
+    /// <summary>External code (from ERP)</summary>
+    [JsonPropertyName("externalCode")]
+    public string? ExternalCode { get; set; }
+
+    /// <summary>Vendor code</summary>
+    [JsonPropertyName("vendorCode")]
+    public string? VendorCode { get; set; }
+
+    /// <summary>Product barcode</summary>
+    [JsonPropertyName("barcode")]
+    public string? Barcode { get; set; }
+
+    /// <summary>Product name</summary>
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>Weight in kg (critical for Heavy-on-Bottom rule)</summary>
+    [JsonPropertyName("weightKg")]
+    public double WeightKg { get; set; }
+
+    /// <summary>Volume in m³</summary>
+    [JsonPropertyName("volumeM3")]
+    public double VolumeM3 { get; set; }
+
+    /// <summary>Weight category: 0=Light, 1=Medium, 2=Heavy</summary>
+    [JsonPropertyName("weightCategory")]
+    public int WeightCategory { get; set; }
+
+    /// <summary>Category code</summary>
+    [JsonPropertyName("categoryCode")]
+    public string? CategoryCode { get; set; }
+
+    /// <summary>Category name</summary>
+    [JsonPropertyName("categoryName")]
+    public string? CategoryName { get; set; }
+
+    /// <summary>Maximum quantity per pallet</summary>
+    [JsonPropertyName("maxQtyPerPallet")]
+    public int MaxQtyPerPallet { get; set; }
+
+    /// <summary>Picking type (pieces, boxes, pallets)</summary>
+    [JsonPropertyName("pickingType")]
+    public string? PickingType { get; set; }
+
+    /// <summary>Unit of measure</summary>
+    [JsonPropertyName("unitName")]
+    public string? UnitName { get; set; }
+
+    /// <summary>Last modification timestamp</summary>
+    [JsonPropertyName("modifiedAt")]
+    public DateTime? ModifiedAt { get; set; }
 }
 
 /// <summary>
@@ -591,6 +688,28 @@ public class Wms1CClient : IWms1CClient
     public async Task<WmsStatistics?> GetStatisticsAsync(CancellationToken ct = default)
     {
         return await GetAsync<WmsStatistics>("statistics", ct);
+    }
+
+    public async Task<PagedResponse<WmsProductRecord>> GetProductsAsync(
+        string? afterId = null,
+        string? categoryCode = null,
+        DateTime? modifiedAfter = null,
+        int? limit = null,
+        CancellationToken ct = default)
+    {
+        var url = BuildUrl("products", afterId, limit);
+
+        if (!string.IsNullOrEmpty(categoryCode))
+        {
+            url += $"&category={Uri.EscapeDataString(categoryCode)}";
+        }
+
+        if (modifiedAfter.HasValue)
+        {
+            url += $"&modifiedAfter={modifiedAfter.Value:O}";
+        }
+
+        return await GetAsync<PagedResponse<WmsProductRecord>>(url, ct) ?? new PagedResponse<WmsProductRecord>();
     }
 
     private string BuildUrl(string endpoint, string? afterId = null, int? limit = null)

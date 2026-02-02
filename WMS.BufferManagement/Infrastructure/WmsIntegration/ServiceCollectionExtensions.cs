@@ -43,6 +43,7 @@ public static class WmsIntegrationServiceCollectionExtensions
         IConfiguration configuration)
     {
         services.Configure<HistoricalOptions>(configuration.GetSection("Historical"));
+        services.Configure<RouteStatisticsOptions>(configuration.GetSection("RouteStatistics"));
 
         services.AddSingleton<IHistoricalRepository, TimescaleDbRepository>();
 

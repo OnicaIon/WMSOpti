@@ -37,9 +37,24 @@ public class WmsSyncSettings
     public int AggregationIntervalMs { get; set; } = 60000;
 
     /// <summary>
+    /// Интервал синхронизации продуктов (мс) - реже, т.к. справочник меняется редко
+    /// </summary>
+    public int ProductsSyncIntervalMs { get; set; } = 3600000; // 1 час
+
+    /// <summary>
     /// Включена ли синхронизация
     /// </summary>
     public bool Enabled { get; set; } = true;
+
+    /// <summary>
+    /// Максимальное количество заданий для загрузки (0 = без ограничения)
+    /// </summary>
+    public int MaxTasksToSync { get; set; } = 0;
+
+    /// <summary>
+    /// Очистить таблицу заданий перед синхронизацией
+    /// </summary>
+    public bool TruncateBeforeSync { get; set; } = false;
 }
 
 /// <summary>
@@ -50,10 +65,12 @@ public class SyncState
     public string? LastTaskId { get; set; }
     public string? LastPickerActivityId { get; set; }
     public string? LastBufferSnapshotId { get; set; }
+    public string? LastProductId { get; set; }
     public DateTime LastTasksSync { get; set; }
     public DateTime LastPickersSync { get; set; }
     public DateTime LastForkliftsSync { get; set; }
     public DateTime LastBufferSync { get; set; }
+    public DateTime LastProductsSync { get; set; }
     public DateTime LastAggregation { get; set; }
 }
 
@@ -73,15 +90,19 @@ public class WmsDataSyncService : BackgroundService
     public event Action<List<WmsPickerRecord>>? OnPickersSynced;
     public event Action<List<WmsForkliftRecord>>? OnForkliftsSynced;
     public event Action<WmsBufferState>? OnBufferStateSynced;
+    public event Action<List<WmsProductRecord>>? OnProductsSynced;
 
     // Кэш текущего состояния для быстрого доступа
     public IReadOnlyList<WmsPickerRecord> CurrentPickers => _currentPickers;
     public IReadOnlyList<WmsForkliftRecord> CurrentForklifts => _currentForklifts;
     public WmsBufferState? CurrentBufferState => _currentBufferState;
+    public IReadOnlyDictionary<string, WmsProductRecord> Products => _products;
 
     private List<WmsPickerRecord> _currentPickers = new();
     private List<WmsForkliftRecord> _currentForklifts = new();
     private WmsBufferState? _currentBufferState;
+    private Dictionary<string, WmsProductRecord> _products = new();
+    private bool _truncateDone = false;
 
     public WmsDataSyncService(
         IWms1CClient wmsClient,
@@ -111,17 +132,54 @@ public class WmsDataSyncService : BackgroundService
         // Инициализируем схему БД
         await _repository.InitializeSchemaAsync(stoppingToken);
 
-        // Запускаем параллельные циклы синхронизации
-        var tasks = new List<Task>
-        {
-            RunSyncLoopAsync(SyncTasksAsync, _settings.TasksSyncIntervalMs, "Tasks", stoppingToken),
-            RunSyncLoopAsync(SyncPickersAsync, _settings.PickersSyncIntervalMs, "Pickers", stoppingToken),
-            RunSyncLoopAsync(SyncForkliftsAsync, _settings.ForkliftsSyncIntervalMs, "Forklifts", stoppingToken),
-            RunSyncLoopAsync(SyncBufferAsync, _settings.BufferSyncIntervalMs, "Buffer", stoppingToken),
-            RunSyncLoopAsync(RunAggregationsAsync, _settings.AggregationIntervalMs, "Aggregations", stoppingToken)
-        };
+        // ===== ОДНОКРАТНАЯ СИНХРОНИЗАЦИЯ =====
+        _logger.LogInformation("Starting one-time sync...");
 
-        await Task.WhenAll(tasks);
+        try
+        {
+            // 1. Загружаем справочник продуктов
+            _logger.LogInformation("Syncing products...");
+            await SyncProductsAsync(stoppingToken);
+
+            // 2. Загружаем задания (с truncate если настроено)
+            _logger.LogInformation("Syncing tasks...");
+            await SyncTasksAsync(stoppingToken);
+
+            // 3. Загружаем работников
+            _logger.LogInformation("Syncing workers...");
+            await SyncForkliftsAsync(stoppingToken);
+            await SyncPickersAsync(stoppingToken);
+
+            // 4. Загружаем состояние буфера
+            _logger.LogInformation("Syncing buffer...");
+            await SyncBufferAsync(stoppingToken);
+
+            // 5. Рассчитываем статистику работников
+            _logger.LogInformation("Calculating workers statistics...");
+            await _repository.UpdateWorkersFromTasksAsync(stoppingToken);
+
+            // 6. Рассчитываем статистику маршрутов (с нормализацией IQR)
+            _logger.LogInformation("Calculating route statistics (IQR normalization)...");
+            await _repository.UpdateRouteStatisticsAsync(stoppingToken);
+
+            // 7. Рассчитываем статистику пикер + товар
+            _logger.LogInformation("Calculating picker-product statistics...");
+            await _repository.UpdatePickerProductStatsAsync(stoppingToken);
+
+            _logger.LogInformation("=== SYNC COMPLETE ===");
+            _logger.LogInformation("Tasks synced. LastTaskId: {LastId}", _state.LastTaskId);
+            _logger.LogInformation("Products in cache: {Count}", _products.Count);
+            _logger.LogInformation("Pickers: {Count}, Forklifts: {Count}",
+                _currentPickers.Count, _currentForklifts.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during sync");
+        }
+
+        // Остаёмся активными для обслуживания запросов к кэшу
+        _logger.LogInformation("Sync service ready. Waiting for shutdown...");
+        await Task.Delay(Timeout.Infinite, stoppingToken);
     }
 
     private async Task WaitForWmsAsync(CancellationToken ct)
@@ -167,95 +225,120 @@ public class WmsDataSyncService : BackgroundService
 
     /// <summary>
     /// Синхронизация заданий (Task action из WMS)
+    /// Сохраняем каждые 10,000 записей для экономии памяти
     /// </summary>
     private async Task SyncTasksAsync(CancellationToken ct)
     {
-        var allTasks = new List<WmsTaskRecord>();
-        var afterId = _state.LastTaskId;
+        // Очистка перед синхронизацией если настроено (только один раз)
+        if (_settings.TruncateBeforeSync && !_truncateDone)
+        {
+            _logger.LogInformation("Truncating tasks before sync (TruncateBeforeSync=true)");
+            await _repository.TruncateTasksAsync(ct);
+            _truncateDone = true;
+        }
 
-        // Загружаем все новые записи
+        var pendingTasks = new List<WmsTaskRecord>();
+        var afterId = _state.LastTaskId;
+        var maxTasks = _settings.MaxTasksToSync;
+        var totalLoaded = 0;
+        var totalSaved = 0;
+        const int saveEvery = 10000;
+
+        // Загружаем и сохраняем инкрементально
         while (true)
         {
-            var response = await _wmsClient.GetTasksAsync(afterId, 1000, ct);
+            var response = await _wmsClient.GetTasksAsync(afterId, 500, ct);
 
             if (response.Items.Count == 0)
                 break;
 
-            allTasks.AddRange(response.Items);
+            pendingTasks.AddRange(response.Items);
             afterId = response.LastId;
+            totalLoaded += response.Items.Count;
 
-            if (!response.HasMore)
+            _logger.LogInformation("Loaded {Count} tasks, total: {Total}, lastId: {LastId}",
+                response.Items.Count, totalLoaded, afterId);
+
+            // Сохраняем каждые 10,000 записей
+            if (pendingTasks.Count >= saveEvery)
+            {
+                await SaveTaskBatchAsync(pendingTasks, ct);
+                totalSaved += pendingTasks.Count;
+                _logger.LogInformation("Saved {Saved} tasks to DB (total saved: {TotalSaved})",
+                    pendingTasks.Count, totalSaved);
+                pendingTasks.Clear();
+            }
+
+            // Проверка лимита
+            if (maxTasks > 0 && totalLoaded >= maxTasks)
+            {
+                _logger.LogInformation("Reached MaxTasksToSync limit: {Max}", maxTasks);
+                break;
+            }
+
+            // Продолжаем пока есть записи
+            if (response.Items.Count < 500)
                 break;
         }
 
-        if (allTasks.Count > 0)
+        // Сохраняем оставшиеся записи
+        if (pendingTasks.Count > 0)
         {
-            _logger.LogDebug("Syncing {Count} tasks from WMS", allTasks.Count);
-
-            // Конвертируем Task action в TaskRecord для TimescaleDB
-            // Маппинг полей WMS Task action → TaskRecord:
-            //   id → Id (номер документа)
-            //   actionId → используем как Id если это UUID
-            //   storageBinCode → FromSlot (источник)
-            //   storagePalletCode → PalletId
-            //   allocationBinCode → ToSlot (назначение)
-            //   assigneeCode → ForkliftId (исполнитель, может быть карщик или сборщик)
-            //   actionType → определяет тип операции
-            var records = allTasks.Select(t => new TaskRecord
-            {
-                // Используем ActionId как UUID если есть, иначе генерируем
-                Id = Guid.TryParse(t.ActionId, out var actionGuid) ? actionGuid
-                   : Guid.TryParse(t.Id, out var idGuid) ? idGuid
-                   : Guid.NewGuid(),
-
-                CreatedAt = t.CreatedAt,
-                StartedAt = t.StartedAt,
-                CompletedAt = t.CompletedAt,
-
-                // Палета из источника
-                PalletId = t.StoragePalletCode ?? t.AllocationPalletCode ?? t.Id,
-                ProductType = t.ProductSku,
-
-                // Вес пока не приходит, рассчитаем позже из справочника
-                WeightKg = 0,
-                WeightCategory = "Unknown",
-
-                // Исполнитель (карщик/сборщик)
-                ForkliftId = t.AssigneeCode,
-
-                // Источник (Storage) - извлекаем зону из кода ячейки
-                FromZone = ExtractZoneFromBinCode(t.StorageBinCode),
-                FromSlot = t.StorageBinCode,
-
-                // Назначение (Allocation)
-                ToZone = ExtractZoneFromBinCode(t.AllocationBinCode),
-                ToSlot = t.AllocationBinCode,
-
-                // Расстояние рассчитаем позже если нужно
-                DistanceMeters = null,
-
-                Status = GetTaskStatus(t.Status),
-
-                // Длительность из API или расчёт
-                DurationSec = t.DurationSec.HasValue
-                    ? (decimal)t.DurationSec.Value
-                    : (t.CompletedAt.HasValue && t.StartedAt.HasValue
-                        ? (decimal)(t.CompletedAt.Value - t.StartedAt.Value).TotalSeconds
-                        : null),
-
-                // Дополнительная информация в поле FailureReason
-                FailureReason = t.ActionType != null
-                    ? $"ActionType: {t.ActionType}, Template: {t.TemplateName}"
-                    : null
-            }).ToList();
-
-            await _repository.SaveTasksBatchAsync(records, ct);
-
-            _state.LastTaskId = afterId;
-            _state.LastTasksSync = DateTime.UtcNow;
-
-            OnTasksSynced?.Invoke(allTasks);
+            await SaveTaskBatchAsync(pendingTasks, ct);
+            totalSaved += pendingTasks.Count;
+            _logger.LogInformation("Saved final batch: {Count} tasks (total saved: {TotalSaved})",
+                pendingTasks.Count, totalSaved);
         }
+
+        _state.LastTaskId = afterId;
+        _state.LastTasksSync = DateTime.UtcNow;
+
+        _logger.LogInformation("Tasks sync complete: {Total} loaded, {Saved} saved", totalLoaded, totalSaved);
+    }
+
+    /// <summary>
+    /// Конвертирует и сохраняет пакет задач
+    /// </summary>
+    private async Task SaveTaskBatchAsync(List<WmsTaskRecord> tasks, CancellationToken ct)
+    {
+        var records = tasks.Select(t => new TaskRecord
+        {
+            Id = Guid.TryParse(t.ActionId, out var actionGuid) ? actionGuid
+               : Guid.TryParse(t.Id, out var idGuid) ? idGuid
+               : Guid.NewGuid(),
+            CreatedAt = t.CreatedAt,
+            StartedAt = t.StartedAt,
+            CompletedAt = t.CompletedAt,
+            PalletId = t.StoragePalletCode ?? t.AllocationPalletCode ?? t.Id,
+            ProductType = !string.IsNullOrEmpty(t.ProductSku) ? t.ProductSku
+                        : !string.IsNullOrEmpty(t.ProductCode) ? t.ProductCode
+                        : null,
+            WeightKg = (decimal)(t.ProductWeight * t.Qty / 1000.0),  // Общий вес в кг = (граммы * количество) / 1000
+            WeightCategory = "Unknown",
+            Qty = (decimal)t.Qty,
+            WorkerId = t.AssigneeCode,
+            WorkerName = t.AssigneeName,
+            WorkerRole = t.WorkerRole,
+            TemplateCode = t.TemplateCode,
+            TemplateName = t.TemplateName,
+            TaskBasisNumber = t.TaskBasisNumber,
+            ForkliftId = t.WorkerRole == "Forklift" ? t.AssigneeCode : null,
+            FromZone = ExtractZoneFromBinCode(t.StorageBinCode),
+            FromSlot = t.StorageBinCode,
+            ToZone = ExtractZoneFromBinCode(t.AllocationBinCode),
+            ToSlot = t.AllocationBinCode,
+            DistanceMeters = null,
+            Status = GetTaskStatus(t.Status),
+            DurationSec = t.DurationSec.HasValue
+                ? (decimal)t.DurationSec.Value
+                : (t.CompletedAt.HasValue && t.StartedAt.HasValue
+                    ? (decimal)(t.CompletedAt.Value - t.StartedAt.Value).TotalSeconds
+                    : null),
+            FailureReason = null
+        }).ToList();
+
+        UpdateWorkersFromTasks(tasks);
+        await _repository.SaveTasksBatchAsync(records, ct);
     }
 
     /// <summary>
@@ -303,6 +386,63 @@ public class WmsDataSyncService : BackgroundService
             : parts[0];
 
         return (zone, parts[1], parts[2], parts[3]);
+    }
+
+    /// <summary>
+    /// Обновляет списки пикеров и карщиков на основе заданий
+    /// TemplateCode 029 = Forklift (Distribution replenish)
+    /// TemplateCode 031 = Picker (Put product into the bin)
+    /// </summary>
+    private void UpdateWorkersFromTasks(List<WmsTaskRecord> tasks)
+    {
+        // Группируем работников по ролям
+        var forklifts = tasks
+            .Where(t => t.WorkerRole == "Forklift" && !string.IsNullOrEmpty(t.AssigneeCode))
+            .GroupBy(t => t.AssigneeCode)
+            .Select(g => new WmsForkliftRecord
+            {
+                Id = g.Key!,
+                OperatorId = g.Key!,
+                OperatorName = g.First().AssigneeName ?? g.Key!,
+                Status = 1, // Active
+                CurrentTaskId = g.OrderByDescending(t => t.CreatedAt).FirstOrDefault()?.Id
+            })
+            .ToList();
+
+        var pickers = tasks
+            .Where(t => t.WorkerRole == "Picker" && !string.IsNullOrEmpty(t.AssigneeCode))
+            .GroupBy(t => t.AssigneeCode)
+            .Select(g => new WmsPickerRecord
+            {
+                Id = g.Key!,
+                Name = g.First().AssigneeName ?? g.Key!,
+                Status = 1, // Active
+                PalletsToday = g.Count(t => t.CompletedAt?.Date == DateTime.Today)
+            })
+            .ToList();
+
+        // Обновляем кэш, сохраняя уникальных работников
+        if (forklifts.Count > 0)
+        {
+            var existingIds = _currentForklifts.Select(f => f.Id).ToHashSet();
+            foreach (var f in forklifts.Where(f => !existingIds.Contains(f.Id)))
+            {
+                _currentForklifts.Add(f);
+            }
+            _logger.LogDebug("Updated forklifts from tasks: {NewCount} new, {TotalCount} total",
+                forklifts.Count(f => !existingIds.Contains(f.Id)), _currentForklifts.Count);
+        }
+
+        if (pickers.Count > 0)
+        {
+            var existingIds = _currentPickers.Select(p => p.Id).ToHashSet();
+            foreach (var p in pickers.Where(p => !existingIds.Contains(p.Id)))
+            {
+                _currentPickers.Add(p);
+            }
+            _logger.LogDebug("Updated pickers from tasks: {NewCount} new, {TotalCount} total",
+                pickers.Count(p => !existingIds.Contains(p.Id)), _currentPickers.Count);
+        }
     }
 
     /// <summary>
@@ -430,6 +570,90 @@ public class WmsDataSyncService : BackgroundService
         {
             OnBufferStateSynced?.Invoke(_currentBufferState);
         }
+    }
+
+    /// <summary>
+    /// Синхронизация справочника продуктов (для Heavy-on-Bottom rule)
+    /// </summary>
+    private async Task SyncProductsAsync(CancellationToken ct)
+    {
+        var allProducts = new List<WmsProductRecord>();
+        var afterId = _state.LastProductId;
+
+        // Загружаем все продукты (инкрементально)
+        while (true)
+        {
+            var response = await _wmsClient.GetProductsAsync(afterId, limit: 1000, ct: ct);
+
+            if (response.Items.Count == 0)
+                break;
+
+            allProducts.AddRange(response.Items);
+            afterId = response.LastId;
+
+            if (!response.HasMore)
+                break;
+        }
+
+        if (allProducts.Count > 0)
+        {
+            _logger.LogInformation("Synced {Count} products from WMS", allProducts.Count);
+
+            // Обновляем кэш продуктов (словарь по коду для быстрого доступа)
+            foreach (var product in allProducts)
+            {
+                _products[product.Code] = product;
+            }
+
+            // Сохраняем в БД
+            var productRecords = allProducts.Select(p => new Layers.Historical.Persistence.Models.ProductRecord
+            {
+                Code = p.Code,
+                Sku = p.Sku,
+                Name = p.Name,
+                ExternalCode = p.ExternalCode,
+                VendorCode = p.VendorCode,
+                Barcode = p.Barcode,
+                WeightKg = (decimal)p.WeightKg,
+                VolumeM3 = (decimal)p.VolumeM3,
+                WeightCategory = p.WeightCategory,
+                CategoryCode = p.CategoryCode,
+                CategoryName = p.CategoryName,
+                MaxQtyPerPallet = p.MaxQtyPerPallet,
+                SyncedAt = DateTime.UtcNow
+            });
+
+            await _repository.SaveProductsBatchAsync(productRecords, ct);
+
+            _state.LastProductId = afterId;
+            OnProductsSynced?.Invoke(allProducts);
+        }
+
+        _state.LastProductsSync = DateTime.UtcNow;
+    }
+
+    /// <summary>
+    /// Получить вес продукта по SKU (для Heavy-on-Bottom rule)
+    /// </summary>
+    public double GetProductWeight(string? sku)
+    {
+        if (string.IsNullOrEmpty(sku))
+            return 0;
+
+        // Сначала ищем по SKU
+        var product = _products.Values.FirstOrDefault(p =>
+            p.Sku == sku || p.Code == sku || p.ExternalCode == sku);
+
+        return product?.WeightKg ?? 0;
+    }
+
+    /// <summary>
+    /// Получить категорию веса продукта (Light/Medium/Heavy)
+    /// </summary>
+    public string GetProductWeightCategory(string? sku)
+    {
+        var weight = GetProductWeight(sku);
+        return GetWeightCategory(weight);
     }
 
     /// <summary>

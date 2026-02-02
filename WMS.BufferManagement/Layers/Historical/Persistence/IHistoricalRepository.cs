@@ -32,6 +32,16 @@ public interface IHistoricalRepository
     Task SaveTasksBatchAsync(IEnumerable<TaskRecord> tasks, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Очистить все задания (TRUNCATE)
+    /// </summary>
+    Task TruncateTasksAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Получить количество заданий
+    /// </summary>
+    Task<long> GetTasksCountAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Получить статистику заданий по карщикам
     /// </summary>
     Task<IReadOnlyList<ForkliftTaskStats>> GetForkliftStatsAsync(
@@ -99,6 +109,13 @@ public interface IHistoricalRepository
         TimeSpan? bucket = null,
         CancellationToken cancellationToken = default);
 
+    // === Products (справочник) ===
+
+    /// <summary>
+    /// Сохранить или обновить продукты (UPSERT)
+    /// </summary>
+    Task SaveProductsBatchAsync(IEnumerable<ProductRecord> products, CancellationToken cancellationToken = default);
+
     // === ML Data Export ===
 
     /// <summary>
@@ -113,6 +130,50 @@ public interface IHistoricalRepository
     /// </summary>
     Task<IReadOnlyList<DemandTrainingRow>> ExportDemandTrainingDataAsync(
         int lastDays = 30,
+        CancellationToken cancellationToken = default);
+
+    // === Workers & Route Statistics ===
+
+    /// <summary>
+    /// Обновляет таблицу workers на основе данных из tasks
+    /// </summary>
+    Task UpdateWorkersFromTasksAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Рассчитывает статистику маршрутов для карщиков с нормализацией (IQR)
+    /// </summary>
+    Task UpdateRouteStatisticsAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Получает список работников с их статистикой
+    /// </summary>
+    Task<List<WorkerRecord>> GetWorkersAsync(string? role = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Получает статистику маршрутов
+    /// </summary>
+    Task<List<RouteStatistics>> GetRouteStatisticsAsync(
+        string? fromZone = null, string? toZone = null, int minTrips = 3,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Прогнозирует время выполнения маршрута
+    /// </summary>
+    Task<decimal?> PredictRouteDurationAsync(string fromSlot, string toSlot, CancellationToken cancellationToken = default);
+
+    // === Picker + Product Statistics ===
+
+    /// <summary>
+    /// Рассчитывает статистику пикер + товар (строк/мин по товару)
+    /// Вызывать периодически (не при каждом импорте!)
+    /// </summary>
+    Task UpdatePickerProductStatsAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Получает статистику пикер + товар
+    /// </summary>
+    Task<List<PickerProductStats>> GetPickerProductStatsAsync(
+        string? pickerId = null, string? productSku = null, int minLines = 3,
         CancellationToken cancellationToken = default);
 }
 

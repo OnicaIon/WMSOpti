@@ -23,16 +23,28 @@ public static class ProgramWithWms
 {
     public static async Task Main(string[] args)
     {
-        var useWms = args.Contains("--wms");
-
         SystemConsole.OutputEncoding = System.Text.Encoding.UTF8;
+
+        // Режим расчёта статистики (--calc)
+        if (args.Contains("--calc"))
+        {
+            SystemConsole.WriteLine("╔══════════════════════════════════════════════════════════════╗");
+            SystemConsole.WriteLine("║  WMS Buffer Management - Statistics Calculator               ║");
+            SystemConsole.WriteLine("╚══════════════════════════════════════════════════════════════╝");
+            SystemConsole.WriteLine();
+
+            var host = CreateHostBuilder(args).Build();
+            await RunCalculations.ExecuteAsync(host.Services);
+            return;
+        }
+
         SystemConsole.WriteLine("╔══════════════════════════════════════════════════════════════╗");
         SystemConsole.WriteLine("║  WMS Buffer Management System v1.0                           ║");
-        SystemConsole.WriteLine($"║  Mode: {(useWms ? "WMS Integration" : "Simulation")}                                      ║");
+        SystemConsole.WriteLine("║  Mode: WMS Integration                                       ║");
         SystemConsole.WriteLine("╚══════════════════════════════════════════════════════════════╝");
         SystemConsole.WriteLine();
 
-        var host = CreateHostBuilder(args, useWms).Build();
+        var hostFull = CreateHostBuilder(args).Build();
 
         var cts = new CancellationTokenSource();
 
@@ -45,7 +57,7 @@ public static class ProgramWithWms
 
         try
         {
-            await host.RunAsync(cts.Token);
+            await hostFull.RunAsync(cts.Token);
         }
         catch (OperationCanceledException)
         {
@@ -53,7 +65,7 @@ public static class ProgramWithWms
         }
     }
 
-    private static IHostBuilder CreateHostBuilder(string[] args, bool useWms)
+    private static IHostBuilder CreateHostBuilder(string[] args)
     {
         return Host.CreateDefaultBuilder(args)
             .ConfigureAppConfiguration((context, config) =>
@@ -109,25 +121,19 @@ public static class ProgramWithWms
                 // Historical слой
                 services.AddSingleton<PickerSpeedPredictor>();
 
-                if (useWms)
-                {
-                    // Режим WMS интеграции
-                    services.AddWms1CIntegration(configuration);
-                    services.AddHistoricalPersistence(configuration);
+                // WMS интеграция (всегда включена)
+                services.AddWms1CIntegration(configuration);
+                services.AddHistoricalPersistence(configuration);
 
-                    // Фоновые службы
-                    services.AddHostedService<BufferManagementService>();
-                    services.AddSingleton<AggregationService>();
-                    services.AddHostedService(sp => sp.GetRequiredService<AggregationService>());
+                // Фоновые службы (регистрируем как Singleton + HostedService)
+                services.AddSingleton<BufferManagementService>();
+                services.AddHostedService(sp => sp.GetRequiredService<BufferManagementService>());
 
-                    // Служба вывода статистики
-                    services.AddHostedService<StatsReportingService>();
-                }
-                else
-                {
-                    // Режим симуляции (существующая логика)
-                    services.AddHostedService<SimulationHostedService>();
-                }
+                services.AddSingleton<AggregationService>();
+                services.AddHostedService(sp => sp.GetRequiredService<AggregationService>());
+
+                // Служба вывода статистики (отключена)
+                // services.AddHostedService<StatsReportingService>();
             });
     }
 }
@@ -195,75 +201,3 @@ public class StatsReportingService : BackgroundService
     }
 }
 
-/// <summary>
-/// Служба симуляции (обёртка над существующей логикой)
-/// </summary>
-public class SimulationHostedService : BackgroundService
-{
-    private readonly IServiceProvider _services;
-    private readonly IConfiguration _configuration;
-    private readonly ILogger<SimulationHostedService> _logger;
-
-    public SimulationHostedService(
-        IServiceProvider services,
-        IConfiguration configuration,
-        ILogger<SimulationHostedService> logger)
-    {
-        _services = services;
-        _configuration = configuration;
-        _logger = logger;
-    }
-
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        _logger.LogInformation("Running in simulation mode. Use --wms flag for WMS integration.");
-
-        var config = new SystemConfig();
-        _configuration.Bind(config);
-
-        var eventBus = _services.GetRequiredService<IEventBus>();
-        var bufferController = _services.GetRequiredService<HysteresisController>();
-        var dispatcher = _services.GetRequiredService<ForkliftDispatcher>();
-        var metricsStore = _services.GetRequiredService<MetricsStore>();
-
-        var simulator = new Simulation.WarehouseSimulator(config.Simulation, config.Workers, config.Buffer, eventBus);
-        var renderer = new Console.ConsoleRenderer();
-
-        simulator.ActivatePickers(config.Workers.PickersCount);
-        var initialStream = simulator.CreateTestStream(10);
-        dispatcher.EnqueueStream(initialStream);
-
-        var lastUpdate = DateTime.UtcNow;
-
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            var now = DateTime.UtcNow;
-            var deltaTime = now - lastUpdate;
-            lastUpdate = now;
-
-            simulator.Tick(deltaTime);
-
-            var consumptionRate = simulator.Pickers
-                .Where(p => p.State == Domain.Entities.PickerState.Picking)
-                .Sum(p => p.PalletConsumptionRatePerHour);
-
-            bufferController.Update(simulator.Buffer, consumptionRate);
-            dispatcher.DispatchTasks(simulator.Forklifts);
-
-            if (bufferController.IsUrgentDeliveryRequired || simulator.Buffer.FillLevel < config.Buffer.LowThreshold)
-            {
-                var palletsNeeded = bufferController.GetPalletsToRequest();
-                if (dispatcher.CurrentStream == null || dispatcher.CurrentStream.IsCompleted)
-                {
-                    var urgentStream = simulator.CreateTestStream(palletsNeeded);
-                    dispatcher.EnqueueStream(urgentStream);
-                }
-            }
-
-            var stats = simulator.GetStats();
-            renderer.Render(stats, bufferController.CurrentState, simulator.Forklifts, simulator.Pickers);
-
-            await Task.Delay(config.Timing.RealtimeCycleMs, stoppingToken);
-        }
-    }
-}

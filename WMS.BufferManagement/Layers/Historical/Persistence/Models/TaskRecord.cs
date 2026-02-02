@@ -16,8 +16,19 @@ public class TaskRecord
     public string? ProductType { get; set; }
     public decimal? WeightKg { get; set; }
     public string? WeightCategory { get; set; }  // Heavy, Medium, Light
+    public decimal Qty { get; set; }  // Количество единиц товара
 
     // Исполнитель
+    public string? WorkerId { get; set; }
+    public string? WorkerName { get; set; }
+    public string? WorkerRole { get; set; }  // Forklift, Picker, Unknown
+
+    // Шаблон действия
+    public string? TemplateCode { get; set; }
+    public string? TemplateName { get; set; }
+    public string? TaskBasisNumber { get; set; }
+
+    [Obsolete("Use WorkerId instead")]
     public string? ForkliftId { get; set; }
 
     // Маршрут
