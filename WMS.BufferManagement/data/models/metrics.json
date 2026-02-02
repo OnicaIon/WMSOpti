@@ -1,0 +1,27 @@
+{
+  "GeneratedAt": "2026-02-02T21:14:47.1979773Z",
+  "PickerModel": {
+    "ModelName": "PickerTaskDuration",
+    "TrainedAt": "2026-02-02T21:14:54.0050388Z",
+    "TrainSamples": 41992,
+    "TestSamples": 10498,
+    "GlobalAvgMAE": 312.22086323618004,
+    "SpecificAvgMAE": 268.054181744108,
+    "MlModelMAE": 187.0488184616665,
+    "ImprovementVsGlobal": 40.1,
+    "ImprovementVsSpecific": 30.2,
+    "ModelPath": "data/models/picker_model_2026-02-02.zip"
+  },
+  "ForkliftModel": {
+    "ModelName": "ForkliftRouteDuration",
+    "TrainedAt": "2026-02-02T21:14:55.9688376Z",
+    "TrainSamples": 42212,
+    "TestSamples": 10553,
+    "GlobalAvgMAE": 21.165608471765864,
+    "SpecificAvgMAE": 20.82349925464582,
+    "MlModelMAE": 20.255942574928216,
+    "ImprovementVsGlobal": 4.3,
+    "ImprovementVsSpecific": 2.7,
+    "ModelPath": "data/models/forklift_model_2026-02-02.zip"
+  }
+}

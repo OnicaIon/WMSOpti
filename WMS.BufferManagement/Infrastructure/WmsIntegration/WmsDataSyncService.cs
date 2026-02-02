@@ -42,9 +42,19 @@ public class WmsSyncSettings
     public int ProductsSyncIntervalMs { get; set; } = 3600000; // 1 час
 
     /// <summary>
+    /// Интервал синхронизации зон и ячеек (мс) - редко, справочники меняются редко
+    /// </summary>
+    public int ZonesCellsSyncIntervalMs { get; set; } = 3600000; // 1 час
+
+    /// <summary>
     /// Включена ли синхронизация
     /// </summary>
     public bool Enabled { get; set; } = true;
+
+    /// <summary>
+    /// Включена ли синхронизация зон и ячеек
+    /// </summary>
+    public bool ZonesCellsSyncEnabled { get; set; } = true;
 
     /// <summary>
     /// Максимальное количество заданий для загрузки (0 = без ограничения)
@@ -140,6 +150,10 @@ public class WmsDataSyncService : BackgroundService
             // 1. Загружаем справочник продуктов
             _logger.LogInformation("Syncing products...");
             await SyncProductsAsync(stoppingToken);
+
+            // 1.5. Загружаем зоны и ячейки
+            _logger.LogInformation("Syncing zones and cells...");
+            await SyncZonesAndCellsAsync(stoppingToken);
 
             // 2. Загружаем задания (с truncate если настроено)
             _logger.LogInformation("Syncing tasks...");
@@ -700,5 +714,86 @@ public class WmsDataSyncService : BackgroundService
             > 0.85 => "Overflow",
             _ => "Normal"
         };
+    }
+
+    /// <summary>
+    /// Синхронизация зон склада
+    /// </summary>
+    public async Task SyncZonesAsync(CancellationToken ct)
+    {
+        _logger.LogInformation("Syncing zones...");
+
+        var response = await _wmsClient.GetZonesAsync(ct);
+
+        if (response.Items.Count == 0)
+        {
+            _logger.LogWarning("No zones received from WMS");
+            return;
+        }
+
+        // Определяем буферные зоны (зона "I" или тип "Picking")
+        var bufferZoneCodes = new HashSet<string> { "I" };
+
+        await _repository.UpsertZonesAsync(response.Items, bufferZoneCodes, ct);
+
+        var bufferZones = response.Items.Where(z =>
+            bufferZoneCodes.Contains(z.Code) || z.ZoneType == "Picking").ToList();
+
+        _logger.LogInformation("Synced {Count} zones ({BufferCount} buffer zones: {Codes})",
+            response.Items.Count,
+            bufferZones.Count,
+            string.Join(", ", bufferZones.Select(z => z.Code)));
+    }
+
+    /// <summary>
+    /// Синхронизация ячеек склада
+    /// </summary>
+    public async Task SyncCellsAsync(CancellationToken ct)
+    {
+        _logger.LogInformation("Syncing cells...");
+
+        int totalSynced = 0;
+        string? lastCode = null;
+
+        while (true)
+        {
+            var response = await _wmsClient.GetCellsAsync(
+                afterId: lastCode,
+                limit: 10000,
+                ct: ct);
+
+            if (response.Items.Count == 0)
+                break;
+
+            await _repository.UpsertCellsAsync(response.Items, ct);
+            totalSynced += response.Items.Count;
+            lastCode = response.LastId;
+
+            _logger.LogInformation("Synced {Count} cells (total: {Total})",
+                response.Items.Count, totalSynced);
+
+            if (!response.HasMore)
+                break;
+        }
+
+        // Подсчёт буферных ячеек
+        var bufferCellsCount = await _repository.GetBufferCellsCountAsync(ct);
+        _logger.LogInformation("Cells sync complete. Total: {Total}, Buffer cells: {Buffer}",
+            totalSynced, bufferCellsCount);
+    }
+
+    /// <summary>
+    /// Синхронизация зон и ячеек (вызывается из ExecuteAsync)
+    /// </summary>
+    public async Task SyncZonesAndCellsAsync(CancellationToken ct)
+    {
+        if (!_settings.ZonesCellsSyncEnabled)
+        {
+            _logger.LogInformation("Zones/cells sync is disabled");
+            return;
+        }
+
+        await SyncZonesAsync(ct);
+        await SyncCellsAsync(ct);
     }
 }

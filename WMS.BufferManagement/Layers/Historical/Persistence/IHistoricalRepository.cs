@@ -175,6 +175,35 @@ public interface IHistoricalRepository
     Task<List<PickerProductStats>> GetPickerProductStatsAsync(
         string? pickerId = null, string? productSku = null, int minLines = 3,
         CancellationToken cancellationToken = default);
+
+    // === Zones & Cells ===
+
+    /// <summary>
+    /// Сохранить или обновить зоны (UPSERT)
+    /// </summary>
+    /// <param name="zones">Список зон из WMS</param>
+    /// <param name="bufferZoneCodes">Коды зон которые считаются буферными</param>
+    Task UpsertZonesAsync(
+        IEnumerable<WMS.BufferManagement.Infrastructure.WmsIntegration.WmsZoneRecord> zones,
+        HashSet<string> bufferZoneCodes,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Сохранить или обновить ячейки (UPSERT)
+    /// </summary>
+    Task UpsertCellsAsync(
+        IEnumerable<WMS.BufferManagement.Infrastructure.WmsIntegration.WmsCellRecord> cells,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Получить количество буферных ячеек (is_buffer=true)
+    /// </summary>
+    Task<int> GetBufferCellsCountAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Получить ёмкость буфера (количество ячеек в буферных зонах)
+    /// </summary>
+    Task<int> GetBufferCapacityAsync(CancellationToken cancellationToken = default);
 }
 
 // === Дополнительные модели для статистики ===

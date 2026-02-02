@@ -221,6 +221,65 @@ public class TimescaleDbRepository : IHistoricalRepository, IAsyncDisposable
             "CREATE INDEX IF NOT EXISTS idx_picker_product_sku ON picker_product_stats (product_sku);",
             cancellationToken);
 
+        // Таблица зон
+        await ExecuteNonQueryAsync(conn, @"
+            CREATE TABLE IF NOT EXISTS zones (
+                code                VARCHAR(10) PRIMARY KEY,
+                name                VARCHAR(50),
+                warehouse_code      VARCHAR(20),
+                warehouse_name      VARCHAR(100),
+                zone_type           VARCHAR(20),
+                default_cell_code   VARCHAR(30),
+                cell_code_template  VARCHAR(100),
+                picking_route       VARCHAR(20),
+                ext_code            VARCHAR(40),
+                index_number        INTEGER,
+                is_buffer           BOOLEAN DEFAULT FALSE,
+                created_at          TIMESTAMPTZ DEFAULT NOW(),
+                updated_at          TIMESTAMPTZ DEFAULT NOW()
+            );", cancellationToken);
+
+        await ExecuteNonQueryAsync(conn,
+            "CREATE INDEX IF NOT EXISTS idx_zones_is_buffer ON zones(is_buffer) WHERE is_buffer = TRUE;",
+            cancellationToken);
+        await ExecuteNonQueryAsync(conn,
+            "CREATE INDEX IF NOT EXISTS idx_zones_zone_type ON zones(zone_type);",
+            cancellationToken);
+
+        // Таблица ячеек
+        await ExecuteNonQueryAsync(conn, @"
+            CREATE TABLE IF NOT EXISTS cells (
+                code            VARCHAR(30) PRIMARY KEY,
+                barcode         VARCHAR(30),
+                zone_code       VARCHAR(10) REFERENCES zones(code),
+                cell_type       VARCHAR(20),
+                index_number    INTEGER,
+                is_active       BOOLEAN DEFAULT TRUE,
+                aisle           VARCHAR(5),
+                rack            VARCHAR(5),
+                shelf           VARCHAR(5),
+                position        VARCHAR(5),
+                picking_route   VARCHAR(20),
+                max_weight_kg   DECIMAL(10,3),
+                volume_m3       DECIMAL(10,3),
+                is_buffer       BOOLEAN DEFAULT FALSE,
+                created_at      TIMESTAMPTZ DEFAULT NOW(),
+                updated_at      TIMESTAMPTZ DEFAULT NOW()
+            );", cancellationToken);
+
+        await ExecuteNonQueryAsync(conn,
+            "CREATE INDEX IF NOT EXISTS idx_cells_zone ON cells(zone_code);",
+            cancellationToken);
+        await ExecuteNonQueryAsync(conn,
+            "CREATE INDEX IF NOT EXISTS idx_cells_is_buffer ON cells(is_buffer) WHERE is_buffer = TRUE;",
+            cancellationToken);
+        await ExecuteNonQueryAsync(conn,
+            "CREATE INDEX IF NOT EXISTS idx_cells_aisle_rack ON cells(aisle, rack);",
+            cancellationToken);
+        await ExecuteNonQueryAsync(conn,
+            "CREATE INDEX IF NOT EXISTS idx_cells_picking_route ON cells(picking_route);",
+            cancellationToken);
+
         // Создаём индексы
         await ExecuteNonQueryAsync(conn,
             "CREATE INDEX IF NOT EXISTS idx_tasks_forklift ON tasks (forklift_id, created_at DESC);",
@@ -1437,6 +1496,168 @@ public class TimescaleDbRepository : IHistoricalRepository, IAsyncDisposable
 
         var result = await cmd.ExecuteScalarAsync(ct);
         return result is decimal d ? d : null;
+    }
+
+    // =====================================================
+    // ZONES & CELLS
+    // =====================================================
+
+    /// <summary>
+    /// Сохранить или обновить зоны (UPSERT)
+    /// </summary>
+    public async Task UpsertZonesAsync(
+        IEnumerable<Infrastructure.WmsIntegration.WmsZoneRecord> zones,
+        HashSet<string> bufferZoneCodes,
+        CancellationToken ct = default)
+    {
+        var zoneList = zones.ToList();
+        if (zoneList.Count == 0) return;
+
+        await using var conn = await OpenConnectionAsync(ct);
+        await using var cmd = new NpgsqlCommand(@"
+            INSERT INTO zones (code, name, warehouse_code, warehouse_name, zone_type,
+                               default_cell_code, cell_code_template, picking_route,
+                               ext_code, index_number, is_buffer, updated_at)
+            VALUES (@code, @name, @warehouse_code, @warehouse_name, @zone_type,
+                    @default_cell_code, @cell_code_template, @picking_route,
+                    @ext_code, @index_number, @is_buffer, NOW())
+            ON CONFLICT (code) DO UPDATE SET
+                name = EXCLUDED.name,
+                warehouse_code = EXCLUDED.warehouse_code,
+                warehouse_name = EXCLUDED.warehouse_name,
+                zone_type = EXCLUDED.zone_type,
+                default_cell_code = EXCLUDED.default_cell_code,
+                cell_code_template = EXCLUDED.cell_code_template,
+                picking_route = EXCLUDED.picking_route,
+                ext_code = EXCLUDED.ext_code,
+                index_number = EXCLUDED.index_number,
+                is_buffer = EXCLUDED.is_buffer,
+                updated_at = NOW();", conn);
+
+        foreach (var z in zoneList)
+        {
+            cmd.Parameters.Clear();
+            cmd.Parameters.AddWithValue("code", z.Code);
+            cmd.Parameters.AddWithValue("name", (object?)z.Name ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("warehouse_code", (object?)z.WarehouseCode ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("warehouse_name", (object?)z.WarehouseName ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("zone_type", (object?)z.ZoneType ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("default_cell_code", (object?)z.DefaultCellCode ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("cell_code_template", (object?)z.CellCodeTemplate ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("picking_route", (object?)z.PickingRoute ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("ext_code", (object?)z.ExtCode ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("index_number", z.IndexNumber);
+
+            // Определяем буферную зону: либо явно указана, либо тип Picking
+            var isBuffer = bufferZoneCodes.Contains(z.Code)
+                        || z.ZoneType == "Picking";
+            cmd.Parameters.AddWithValue("is_buffer", isBuffer);
+
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+
+        _logger.LogInformation("Upserted {Count} zones to database", zoneList.Count);
+    }
+
+    /// <summary>
+    /// Сохранить или обновить ячейки (UPSERT)
+    /// </summary>
+    public async Task UpsertCellsAsync(
+        IEnumerable<Infrastructure.WmsIntegration.WmsCellRecord> cells,
+        CancellationToken ct = default)
+    {
+        var cellList = cells.ToList();
+        if (cellList.Count == 0) return;
+
+        await using var conn = await OpenConnectionAsync(ct);
+
+        // Получаем буферные зоны для определения is_buffer ячеек
+        var bufferZones = new HashSet<string>();
+        await using (var zoneCmd = new NpgsqlCommand(
+            "SELECT code FROM zones WHERE is_buffer = TRUE;", conn))
+        {
+            await using var reader = await zoneCmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                bufferZones.Add(reader.GetString(0));
+            }
+        }
+
+        await using var cmd = new NpgsqlCommand(@"
+            INSERT INTO cells (code, barcode, zone_code, cell_type, index_number,
+                               is_active, aisle, rack, shelf, position,
+                               picking_route, max_weight_kg, volume_m3, is_buffer, updated_at)
+            VALUES (@code, @barcode, @zone_code, @cell_type, @index_number,
+                    @is_active, @aisle, @rack, @shelf, @position,
+                    @picking_route, @max_weight_kg, @volume_m3, @is_buffer, NOW())
+            ON CONFLICT (code) DO UPDATE SET
+                barcode = EXCLUDED.barcode,
+                zone_code = EXCLUDED.zone_code,
+                cell_type = EXCLUDED.cell_type,
+                index_number = EXCLUDED.index_number,
+                is_active = EXCLUDED.is_active,
+                aisle = EXCLUDED.aisle,
+                rack = EXCLUDED.rack,
+                shelf = EXCLUDED.shelf,
+                position = EXCLUDED.position,
+                picking_route = EXCLUDED.picking_route,
+                max_weight_kg = EXCLUDED.max_weight_kg,
+                volume_m3 = EXCLUDED.volume_m3,
+                is_buffer = EXCLUDED.is_buffer,
+                updated_at = NOW();", conn);
+
+        foreach (var c in cellList)
+        {
+            cmd.Parameters.Clear();
+            cmd.Parameters.AddWithValue("code", c.Code);
+            cmd.Parameters.AddWithValue("barcode", (object?)c.Barcode ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("zone_code", (object?)c.ZoneCode ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("cell_type", (object?)c.CellType ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("index_number", c.IndexNumber);
+            cmd.Parameters.AddWithValue("is_active", !c.Inactive);
+            cmd.Parameters.AddWithValue("aisle", (object?)c.Aisle ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("rack", (object?)c.Rack ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("shelf", (object?)c.Shelf ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("position", (object?)c.Position ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("picking_route", (object?)c.PickingRoute ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("max_weight_kg", c.MaxWeightKg);
+            cmd.Parameters.AddWithValue("volume_m3", c.VolumeM3);
+
+            // Ячейка буферная если она в буферной зоне
+            var isBuffer = !string.IsNullOrEmpty(c.ZoneCode) && bufferZones.Contains(c.ZoneCode);
+            cmd.Parameters.AddWithValue("is_buffer", isBuffer);
+
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+
+        _logger.LogInformation("Upserted {Count} cells to database", cellList.Count);
+    }
+
+    /// <summary>
+    /// Получить количество буферных ячеек (is_buffer=true и is_active=true)
+    /// </summary>
+    public async Task<int> GetBufferCellsCountAsync(CancellationToken ct = default)
+    {
+        await using var conn = await OpenConnectionAsync(ct);
+        await using var cmd = new NpgsqlCommand(
+            "SELECT COUNT(*)::INT FROM cells WHERE is_buffer = TRUE AND is_active = TRUE;", conn);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result is int count ? count : 0;
+    }
+
+    /// <summary>
+    /// Получить ёмкость буфера (количество ячеек в буферных зонах)
+    /// </summary>
+    public async Task<int> GetBufferCapacityAsync(CancellationToken ct = default)
+    {
+        await using var conn = await OpenConnectionAsync(ct);
+        await using var cmd = new NpgsqlCommand(@"
+            SELECT COUNT(*)::INT
+            FROM cells c
+            JOIN zones z ON c.zone_code = z.code
+            WHERE z.is_buffer = TRUE AND c.is_active = TRUE;", conn);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result is int count ? count : 0;
     }
 
     public async ValueTask DisposeAsync()

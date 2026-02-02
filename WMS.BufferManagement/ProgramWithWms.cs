@@ -25,6 +25,13 @@ public static class ProgramWithWms
     {
         SystemConsole.OutputEncoding = System.Text.Encoding.UTF8;
 
+        // Справка по командам
+        if (args.Contains("--help") || args.Contains("-h"))
+        {
+            PrintHelp();
+            return;
+        }
+
         // Режим расчёта статистики (--calc)
         if (args.Contains("--calc"))
         {
@@ -35,6 +42,20 @@ public static class ProgramWithWms
 
             var host = CreateHostBuilder(args).Build();
             await RunCalculations.ExecuteAsync(host.Services);
+            return;
+        }
+
+        // Режим обучения ML моделей (--train-ml)
+        if (args.Contains("--train-ml"))
+        {
+            await Tools.TrainModelsCommand.RunAsync(args);
+            return;
+        }
+
+        // Режимы синхронизации (--sync-*)
+        if (args.Any(a => a.StartsWith("--sync-") || a == "--truncate-tasks"))
+        {
+            await Tools.SyncCommand.RunAsync(args);
             return;
         }
 
@@ -63,6 +84,46 @@ public static class ProgramWithWms
         {
             // Expected on shutdown
         }
+    }
+
+    private static void PrintHelp()
+    {
+        SystemConsole.WriteLine("╔══════════════════════════════════════════════════════════════╗");
+        SystemConsole.WriteLine("║  WMS Buffer Management System - Command Line Interface       ║");
+        SystemConsole.WriteLine("╚══════════════════════════════════════════════════════════════╝");
+        SystemConsole.WriteLine();
+        SystemConsole.WriteLine("Использование: dotnet run -- [команда]");
+        SystemConsole.WriteLine();
+        SystemConsole.WriteLine("Команды:");
+        SystemConsole.WriteLine("  (без параметров)     Запуск полного сервиса (sync + management)");
+        SystemConsole.WriteLine();
+        SystemConsole.WriteLine("  СИНХРОНИЗАЦИЯ:");
+        SystemConsole.WriteLine("  --sync-tasks         Синхронизация задач из WMS (инкрементально)");
+        SystemConsole.WriteLine("  --sync-zones         Синхронизация зон");
+        SystemConsole.WriteLine("  --sync-cells         Синхронизация ячеек");
+        SystemConsole.WriteLine("  --sync-products      Синхронизация продуктов");
+        SystemConsole.WriteLine("  --sync-all           Синхронизация всего (tasks + zones + cells + products)");
+        SystemConsole.WriteLine();
+        SystemConsole.WriteLine("  ОЧИСТКА:");
+        SystemConsole.WriteLine("  --truncate-tasks     Очистить таблицу задач перед синхронизацией");
+        SystemConsole.WriteLine();
+        SystemConsole.WriteLine("  СТАТИСТИКА:");
+        SystemConsole.WriteLine("  --calc               Пересчёт статистики (workers, routes, picker-product)");
+        SystemConsole.WriteLine("  --calc-workers       Пересчёт статистики работников");
+        SystemConsole.WriteLine("  --calc-routes        Пересчёт статистики маршрутов");
+        SystemConsole.WriteLine("  --calc-picker-product Пересчёт статистики пикер-товар");
+        SystemConsole.WriteLine();
+        SystemConsole.WriteLine("  ML:");
+        SystemConsole.WriteLine("  --train-ml           Обучение ML моделей (picker + forklift)");
+        SystemConsole.WriteLine();
+        SystemConsole.WriteLine("  СПРАВКА:");
+        SystemConsole.WriteLine("  --help, -h           Показать эту справку");
+        SystemConsole.WriteLine();
+        SystemConsole.WriteLine("Примеры:");
+        SystemConsole.WriteLine("  dotnet run -- --sync-tasks              # Загрузить новые задачи");
+        SystemConsole.WriteLine("  dotnet run -- --truncate-tasks --sync-tasks  # Очистить и загрузить все");
+        SystemConsole.WriteLine("  dotnet run -- --calc                    # Пересчитать статистику");
+        SystemConsole.WriteLine("  dotnet run -- --train-ml                # Обучить ML модели");
     }
 
     private static IHostBuilder CreateHostBuilder(string[] args)

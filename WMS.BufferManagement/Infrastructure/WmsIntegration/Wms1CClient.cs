@@ -317,7 +317,7 @@ public interface IWms1CClient
 
     // Справочники
     Task<PagedResponse<WmsWorkerRecord>> GetWorkersAsync(string? afterId = null, string? group = null, CancellationToken ct = default);
-    Task<PagedResponse<WmsCellRecord>> GetCellsAsync(string? afterId = null, string? zoneCode = null, CancellationToken ct = default);
+    Task<PagedResponse<WmsCellRecord>> GetCellsAsync(string? afterId = null, string? zoneCode = null, int? limit = null, CancellationToken ct = default);
     Task<PagedResponse<WmsZoneRecord>> GetZonesAsync(CancellationToken ct = default);
     Task<WmsStatistics?> GetStatisticsAsync(CancellationToken ct = default);
 
@@ -370,8 +370,14 @@ public class WmsCellRecord
     [JsonPropertyName("zoneName")]
     public string? ZoneName { get; set; }
 
-    [JsonPropertyName("zoneType")]
-    public string? ZoneType { get; set; }
+    [JsonPropertyName("cellType")]
+    public string? CellType { get; set; }
+
+    [JsonPropertyName("indexNumber")]
+    public int IndexNumber { get; set; }
+
+    [JsonPropertyName("inactive")]
+    public bool Inactive { get; set; }
 
     [JsonPropertyName("aisle")]
     public string? Aisle { get; set; }
@@ -385,11 +391,14 @@ public class WmsCellRecord
     [JsonPropertyName("position")]
     public string? Position { get; set; }
 
-    [JsonPropertyName("cellType")]
-    public string? CellType { get; set; }
+    [JsonPropertyName("pickingRoute")]
+    public string? PickingRoute { get; set; }
 
-    [JsonPropertyName("disabled")]
-    public bool Disabled { get; set; }
+    [JsonPropertyName("maxWeightKg")]
+    public decimal MaxWeightKg { get; set; }
+
+    [JsonPropertyName("volumeM3")]
+    public decimal VolumeM3 { get; set; }
 }
 
 /// <summary>
@@ -403,11 +412,29 @@ public class WmsZoneRecord
     [JsonPropertyName("name")]
     public string Name { get; set; } = string.Empty;
 
-    [JsonPropertyName("locationName")]
-    public string? LocationName { get; set; }
+    [JsonPropertyName("warehouseCode")]
+    public string? WarehouseCode { get; set; }
+
+    [JsonPropertyName("warehouseName")]
+    public string? WarehouseName { get; set; }
 
     [JsonPropertyName("zoneType")]
     public string? ZoneType { get; set; }
+
+    [JsonPropertyName("defaultCellCode")]
+    public string? DefaultCellCode { get; set; }
+
+    [JsonPropertyName("cellCodeTemplate")]
+    public string? CellCodeTemplate { get; set; }
+
+    [JsonPropertyName("cellBarcodeTemplate")]
+    public string? CellBarcodeTemplate { get; set; }
+
+    [JsonPropertyName("pickingRoute")]
+    public string? PickingRoute { get; set; }
+
+    [JsonPropertyName("extCode")]
+    public string? ExtCode { get; set; }
 
     [JsonPropertyName("indexNumber")]
     public int IndexNumber { get; set; }
@@ -670,9 +697,10 @@ public class Wms1CClient : IWms1CClient
     public async Task<PagedResponse<WmsCellRecord>> GetCellsAsync(
         string? afterId = null,
         string? zoneCode = null,
+        int? limit = null,
         CancellationToken ct = default)
     {
-        var url = BuildUrl("cells", afterId);
+        var url = BuildUrl("cells", afterId, limit ?? 10000);
         if (!string.IsNullOrEmpty(zoneCode))
         {
             url += $"&zone={Uri.EscapeDataString(zoneCode)}";
