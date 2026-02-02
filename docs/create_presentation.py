@@ -84,8 +84,8 @@ def add_content_slide(prs, title, bullets, note=""):
             p = tf.add_paragraph()
 
         p.text = bullet
-        p.font.size = Pt(20)
-        p.space_before = Pt(12)
+        p.font.size = Pt(16)
+        p.space_before = Pt(6)
         p.level = 0
 
     if note:
@@ -159,9 +159,9 @@ def add_diagram_slide(prs, title, diagram_text, bullets=None):
             else:
                 p = tf.add_paragraph()
             p.text = bullet
-            p.font.size = Pt(18)
+            p.font.size = Pt(14)
             p.font.color.rgb = RGBColor(0, 0, 0)  # Black text
-            p.space_before = Pt(8)
+            p.space_before = Pt(4)
 
     return slide
 
@@ -331,8 +331,8 @@ def main():
 
     # Slide 9: How it works
     add_diagram_slide(prs,
-        "8. Цикл оптимизации (каждые 15 минут)",
-        "Заказы (волна) → Прогноз ML.NET → OR-Tools CP-SAT → Исполнение WMS → Обратная связь",
+        "8. Цикл оптимизации (15 мин)",
+        "Заказы → ML.NET → OR-Tools → WMS → Обратная связь",
         [
             "1. Получаем список заказов для сборки",
             "2. ML предсказывает время каждой операции",
