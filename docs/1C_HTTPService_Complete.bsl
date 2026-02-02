@@ -370,9 +370,9 @@ Function GetCells(Request)
     EndIf;
 
     AfterID = GetQueryParameter(Request, "after", "");
-    Limit = GetNumericParameter(Request, "limit", 1000);
-    If Limit > 10000 Then
-        Limit = 10000;
+    Limit = GetNumericParameter(Request, "limit", 10000);
+    If Limit > 50000 Then
+        Limit = 50000;
     EndIf;
     ZoneCode = GetQueryParameter(Request, "zone");
 
@@ -380,14 +380,24 @@ Function GetCells(Request)
     Query.Text =
     "SELECT TOP " + Format(Limit + 1, "NG=0") + "
     |   Cells.Code AS code,
+    |   ISNULL(Cells.Description, """") AS barcode,
     |   ISNULL(Cells.Zone.Code, """") AS zoneCode,
     |   ISNULL(Cells.Zone.Description, """") AS zoneName,
+    |   CASE
+    |       WHEN Cells.CellType = VALUE(Enum.rtCellTypes.Storage) THEN ""Storage""
+    |       WHEN Cells.CellType = VALUE(Enum.rtCellTypes.Picking) THEN ""Picking""
+    |       WHEN Cells.CellType = VALUE(Enum.rtCellTypes.Employee) THEN ""Employee""
+    |       ELSE """"
+    |   END AS cellType,
+    |   ISNULL(Cells.IndexNumber, 0) AS indexNumber,
+    |   ISNULL(Cells.Inactive, FALSE) AS inactive,
     |   ISNULL(Cells.Aisle, """") AS aisle,
     |   ISNULL(Cells.Rack, """") AS rack,
-    |   ISNULL(Cells.Shelf, 0) AS shelf,
+    |   ISNULL(Cells.Shelf, """") AS shelf,
     |   ISNULL(Cells.Position, """") AS position,
-    |   ISNULL(Cells.IndexNumber, 0) AS indexNumber,
-    |   ISNULL(Cells.Inactive, FALSE) AS inactive
+    |   ISNULL(Cells.PickingRoute, """") AS pickingRoute,
+    |   ISNULL(Cells.Weight, 0) AS maxWeightKg,
+    |   ISNULL(Cells.Volume, 0) AS volumeM3
     |FROM
     |   Catalog.rtCells AS Cells
     |WHERE
@@ -409,14 +419,19 @@ Function GetCells(Request)
     While Selection.Next() And Counter < Limit Do
         Item = New Structure;
         Item.Insert("code", Selection.code);
+        Item.Insert("barcode", Selection.barcode);
         Item.Insert("zoneCode", Selection.zoneCode);
         Item.Insert("zoneName", Selection.zoneName);
+        Item.Insert("cellType", Selection.cellType);
+        Item.Insert("indexNumber", Selection.indexNumber);
+        Item.Insert("inactive", Selection.inactive);
         Item.Insert("aisle", Selection.aisle);
         Item.Insert("rack", Selection.rack);
         Item.Insert("shelf", Selection.shelf);
         Item.Insert("position", Selection.position);
-        Item.Insert("indexNumber", Selection.indexNumber);
-        Item.Insert("inactive", Selection.inactive);
+        Item.Insert("pickingRoute", Selection.pickingRoute);
+        Item.Insert("maxWeightKg", Selection.maxWeightKg);
+        Item.Insert("volumeM3", Selection.volumeM3);
 
         ItemsArray.Add(Item);
         LastID = Selection.code;
@@ -448,7 +463,23 @@ Function GetZones(Request)
     "SELECT
     |   Zones.Code AS code,
     |   Zones.Description AS name,
-    |   ISNULL(Zones.Warehouse.Description, """") AS warehouseName
+    |   ISNULL(Zones.Warehouse.Code, """") AS warehouseCode,
+    |   ISNULL(Zones.Warehouse.Description, """") AS warehouseName,
+    |   CASE
+    |       WHEN Zones.ZoneType = VALUE(Enum.rtZoneTypes.Resources) THEN ""Resources""
+    |       WHEN Zones.ZoneType = VALUE(Enum.rtZoneTypes.Receipt) THEN ""Receipt""
+    |       WHEN Zones.ZoneType = VALUE(Enum.rtZoneTypes.Storage) THEN ""Storage""
+    |       WHEN Zones.ZoneType = VALUE(Enum.rtZoneTypes.Picking) THEN ""Picking""
+    |       WHEN Zones.ZoneType = VALUE(Enum.rtZoneTypes.Packing) THEN ""Packing""
+    |       WHEN Zones.ZoneType = VALUE(Enum.rtZoneTypes.Shipping) THEN ""Shipping""
+    |       ELSE """"
+    |   END AS zoneType,
+    |   ISNULL(Zones.CellByDefault.Code, """") AS defaultCellCode,
+    |   ISNULL(Zones.CellCodeTemplate, """") AS cellCodeTemplate,
+    |   ISNULL(Zones.CellBarcodeTemplate, """") AS cellBarcodeTemplate,
+    |   ISNULL(Zones.PickingRoute, """") AS pickingRoute,
+    |   ISNULL(Zones.ExtCode, """") AS extCode,
+    |   ISNULL(Zones.IndexNumber, 0) AS indexNumber
     |FROM
     |   Catalog.rtZones AS Zones
     |WHERE
@@ -463,15 +494,21 @@ Function GetZones(Request)
         Item = New Structure;
         Item.Insert("code", Selection.code);
         Item.Insert("name", Selection.name);
+        Item.Insert("warehouseCode", Selection.warehouseCode);
         Item.Insert("warehouseName", Selection.warehouseName);
+        Item.Insert("zoneType", Selection.zoneType);
+        Item.Insert("defaultCellCode", Selection.defaultCellCode);
+        Item.Insert("cellCodeTemplate", Selection.cellCodeTemplate);
+        Item.Insert("cellBarcodeTemplate", Selection.cellBarcodeTemplate);
+        Item.Insert("pickingRoute", Selection.pickingRoute);
+        Item.Insert("extCode", Selection.extCode);
+        Item.Insert("indexNumber", Selection.indexNumber);
 
         ItemsArray.Add(Item);
     EndDo;
 
     Result = New Structure;
     Result.Insert("items", ItemsArray);
-    Result.Insert("lastId", "");
-    Result.Insert("hasMore", False);
     Result.Insert("count", ItemsArray.Count());
 
     Return CreateResponse(200, Result);
