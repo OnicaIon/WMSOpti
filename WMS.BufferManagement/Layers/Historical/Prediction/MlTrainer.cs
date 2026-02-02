@@ -80,6 +80,11 @@ public class MlTrainer
         if (forkliftResult.HasValue)
             allMetrics.ForkliftModel = forkliftResult.Value.Metrics;
 
+        System.Console.WriteLine();
+
+        // Статистика по товарам
+        allMetrics.ProductStats = await CalculateProductStatisticsAsync();
+
         // Сохраняем метрики в JSON
         await SaveMetricsAsync(allMetrics);
     }
@@ -196,6 +201,175 @@ public class MlTrainer
         System.Console.WriteLine($"\n5. Модель сохранена: {modelPath}");
 
         return (model, metrics);
+    }
+
+    #endregion
+
+    #region Product Statistics
+
+    /// <summary>
+    /// Расчёт статистики по товарам
+    /// </summary>
+    public async Task<ProductStatsSummary> CalculateProductStatisticsAsync()
+    {
+        System.Console.WriteLine("=== СТАТИСТИКА ПО ТОВАРАМ ===\n");
+        System.Console.WriteLine("1. Расчёт статистики...");
+
+        var stats = new List<ProductStatRecord>();
+
+        await using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync();
+
+        // Получаем статистику по каждому товару
+        await using var cmd = new NpgsqlCommand(@"
+            WITH product_tasks AS (
+                SELECT
+                    product_type,
+                    duration_sec,
+                    qty,
+                    created_at
+                FROM tasks
+                WHERE product_type IS NOT NULL
+                  AND duration_sec > 0
+                  AND duration_sec < 600
+                  AND qty > 0
+            ),
+            date_range AS (
+                SELECT
+                    MIN(created_at::date) as min_date,
+                    MAX(created_at::date) as max_date,
+                    GREATEST(1, MAX(created_at::date) - MIN(created_at::date) + 1) as days_count
+                FROM product_tasks
+            )
+            SELECT
+                pt.product_type,
+                AVG(pt.duration_sec) as avg_time,
+                PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY pt.duration_sec) as median_time,
+                STDDEV(pt.duration_sec) as std_dev,
+                PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY pt.qty) as typical_qty,
+                MIN(pt.qty) as min_qty,
+                MAX(pt.qty) as max_qty,
+                COUNT(*) as tasks_count,
+                COUNT(*)::decimal / dr.days_count as tasks_per_day
+            FROM product_tasks pt
+            CROSS JOIN date_range dr
+            GROUP BY pt.product_type, dr.days_count
+            HAVING COUNT(*) >= 10
+            ORDER BY COUNT(*) DESC", conn);
+
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            stats.Add(new ProductStatRecord
+            {
+                ProductCode = reader.GetString(0),
+                ProductName = reader.GetString(0), // Используем код как имя, если имя не доступно
+                AvgTimeSec = reader.IsDBNull(1) ? 0 : (double)reader.GetDecimal(1),
+                MedianTimeSec = reader.IsDBNull(2) ? 0 : reader.GetDouble(2),
+                StdDevSec = reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
+                TypicalQty = reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
+                MinQty = reader.IsDBNull(5) ? 0 : (double)reader.GetDecimal(5),
+                MaxQty = reader.IsDBNull(6) ? 0 : (double)reader.GetDecimal(6),
+                TasksCount = reader.GetInt32(7),
+                TasksPerDay = reader.IsDBNull(8) ? 0 : (double)reader.GetDecimal(8)
+            });
+        }
+
+        System.Console.WriteLine($"   Товаров со статистикой: {stats.Count}");
+
+        if (stats.Count > 0)
+        {
+            var avgTime = stats.Average(s => s.AvgTimeSec);
+            var medianTime = stats.OrderBy(s => s.MedianTimeSec).Skip(stats.Count / 2).First().MedianTimeSec;
+
+            System.Console.WriteLine($"   Среднее время распределения: {avgTime:F1} сек");
+            System.Console.WriteLine($"   Медианное время: {medianTime:F1} сек\n");
+
+            // Топ-10 самых частых товаров
+            System.Console.WriteLine("2. Топ-10 товаров по частоте:\n");
+            System.Console.WriteLine("   ┌──────────────────┬──────────┬──────────┬──────────┬──────────┐");
+            System.Console.WriteLine("   │ Товар            │ Avg(сек) │ Med(сек) │ Кол-во   │ В день   │");
+            System.Console.WriteLine("   ├──────────────────┼──────────┼──────────┼──────────┼──────────┤");
+
+            foreach (var s in stats.Take(10))
+            {
+                var name = s.ProductCode.Length > 16 ? s.ProductCode[..16] : s.ProductCode.PadRight(16);
+                System.Console.WriteLine($"   │ {name} │ {s.AvgTimeSec,8:F1} │ {s.MedianTimeSec,8:F1} │ {s.TasksCount,8} │ {s.TasksPerDay,8:F1} │");
+            }
+            System.Console.WriteLine("   └──────────────────┴──────────┴──────────┴──────────┴──────────┘");
+
+            // Сохраняем в БД (новое соединение, т.к. reader ещё открыт)
+            await SaveProductStatisticsToDbAsync(stats);
+
+            return new ProductStatsSummary
+            {
+                TotalProducts = stats.Count,
+                ProductsWithStats = stats.Count,
+                AvgDistributionTimeSec = avgTime,
+                MedianDistributionTimeSec = medianTime,
+                TopProducts = stats.Take(20).ToList()
+            };
+        }
+
+        return new ProductStatsSummary();
+    }
+
+    private async Task SaveProductStatisticsToDbAsync(List<ProductStatRecord> stats)
+    {
+        System.Console.WriteLine("\n3. Сохранение в БД...");
+
+        await using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync();
+
+        // Создаём таблицу если не существует
+        await using (var createCmd = new NpgsqlCommand(@"
+            CREATE TABLE IF NOT EXISTS product_statistics (
+                product_code TEXT PRIMARY KEY,
+                product_name TEXT,
+                avg_distribution_time_sec DECIMAL(10,2),
+                median_distribution_time_sec DECIMAL(10,2),
+                std_dev_time_sec DECIMAL(10,2),
+                typical_qty DECIMAL(10,2),
+                min_qty DECIMAL(10,2),
+                max_qty DECIMAL(10,2),
+                tasks_count INTEGER,
+                tasks_per_day DECIMAL(10,2),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )", conn))
+        {
+            await createCmd.ExecuteNonQueryAsync();
+        }
+
+        // Очищаем и вставляем заново
+        await using (var truncateCmd = new NpgsqlCommand("TRUNCATE product_statistics", conn))
+        {
+            await truncateCmd.ExecuteNonQueryAsync();
+        }
+
+        // Вставляем данные
+        foreach (var s in stats)
+        {
+            await using var insertCmd = new NpgsqlCommand(@"
+                INSERT INTO product_statistics
+                (product_code, product_name, avg_distribution_time_sec, median_distribution_time_sec,
+                 std_dev_time_sec, typical_qty, min_qty, max_qty, tasks_count, tasks_per_day)
+                VALUES (@code, @name, @avg, @median, @std, @typ, @min, @max, @cnt, @perday)", conn);
+
+            insertCmd.Parameters.AddWithValue("code", s.ProductCode);
+            insertCmd.Parameters.AddWithValue("name", s.ProductName);
+            insertCmd.Parameters.AddWithValue("avg", (decimal)s.AvgTimeSec);
+            insertCmd.Parameters.AddWithValue("median", (decimal)s.MedianTimeSec);
+            insertCmd.Parameters.AddWithValue("std", (decimal)s.StdDevSec);
+            insertCmd.Parameters.AddWithValue("typ", (decimal)s.TypicalQty);
+            insertCmd.Parameters.AddWithValue("min", (decimal)s.MinQty);
+            insertCmd.Parameters.AddWithValue("max", (decimal)s.MaxQty);
+            insertCmd.Parameters.AddWithValue("cnt", s.TasksCount);
+            insertCmd.Parameters.AddWithValue("perday", (decimal)s.TasksPerDay);
+
+            await insertCmd.ExecuteNonQueryAsync();
+        }
+
+        System.Console.WriteLine($"   Сохранено записей: {stats.Count}");
     }
 
     #endregion
@@ -345,6 +519,30 @@ public class MlTrainer
         public DateTime GeneratedAt { get; set; } = DateTime.UtcNow;
         public ModelMetrics? PickerModel { get; set; }
         public ModelMetrics? ForkliftModel { get; set; }
+        public ProductStatsSummary? ProductStats { get; set; }
+    }
+
+    public class ProductStatsSummary
+    {
+        public int TotalProducts { get; set; }
+        public int ProductsWithStats { get; set; }
+        public double AvgDistributionTimeSec { get; set; }
+        public double MedianDistributionTimeSec { get; set; }
+        public List<ProductStatRecord> TopProducts { get; set; } = new();
+    }
+
+    public class ProductStatRecord
+    {
+        public string ProductCode { get; set; } = "";
+        public string ProductName { get; set; } = "";
+        public double AvgTimeSec { get; set; }
+        public double MedianTimeSec { get; set; }
+        public double StdDevSec { get; set; }
+        public double TypicalQty { get; set; }
+        public double MinQty { get; set; }
+        public double MaxQty { get; set; }
+        public int TasksCount { get; set; }
+        public double TasksPerDay { get; set; }
     }
 
     private ModelMetrics EvaluatePickerModel(
