@@ -16,10 +16,9 @@ EndFunction
 
 Function StructureToJSON(Structure)
     JSONWriter = New JSONWriter;
-    JSONWriter.SetString();
-    JSONConversionSettings = New JSONSerializerSettings;
-    JSONConversionSettings.SerializeDate = JSONDateFormat.ISO;
-    WriteJSON(JSONWriter, Structure, JSONConversionSettings);
+    JSONWriterSettings = New JSONWriterSettings(, , True);
+    JSONWriter.SetString(JSONWriterSettings);
+    WriteJSON(JSONWriter, Structure);
     Return JSONWriter.Close();
 EndFunction
 
