@@ -926,7 +926,7 @@ Function GetWaveTasks(Request)
     |   Task.ExecutionDate AS ExecutionDate,
     |   Task.Assignee.Code AS AssigneeCode,
     |   Task.Assignee.Description AS AssigneeName,
-    |   Task.ActionTemplate.Code AS TemplateCode,
+    |   Task.Template.Code AS TemplateCode,
     |   CASE
     |       WHEN Task.PrevTask = VALUE(Document.rtWMSProductSelection.EmptyRef)
     |           THEN ""Replenishment""
