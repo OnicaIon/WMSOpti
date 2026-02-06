@@ -72,7 +72,7 @@ public class TimescaleDbRepository : IHistoricalRepository, IAsyncDisposable
         // Создаём таблицу tasks
         await ExecuteNonQueryAsync(conn, @"
             CREATE TABLE IF NOT EXISTS tasks (
-                id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                id              UUID DEFAULT gen_random_uuid(),
                 created_at      TIMESTAMPTZ NOT NULL,
                 started_at      TIMESTAMPTZ,
                 completed_at    TIMESTAMPTZ,
@@ -94,7 +94,8 @@ public class TimescaleDbRepository : IHistoricalRepository, IAsyncDisposable
                 status          VARCHAR(20) NOT NULL,
                 duration_sec    DECIMAL(10,2),
                 failure_reason  TEXT,
-                forklift_id     VARCHAR(50)
+                forklift_id     VARCHAR(50),
+                PRIMARY KEY (id, created_at)
             );", cancellationToken);
 
         // Добавляем новые колонки если таблица уже существует
@@ -104,6 +105,9 @@ public class TimescaleDbRepository : IHistoricalRepository, IAsyncDisposable
         await TryAddColumn(conn, "tasks", "template_code", "VARCHAR(10)", cancellationToken);
         await TryAddColumn(conn, "tasks", "template_name", "VARCHAR(200)", cancellationToken);
         await TryAddColumn(conn, "tasks", "task_basis_number", "VARCHAR(50)", cancellationToken);
+
+        // Мигрируем PK: TimescaleDB требует колонку партиционирования (created_at) в составе PK
+        await MigrateTasksPrimaryKey(conn, cancellationToken);
 
         // Конвертируем в hypertable (если ещё не)
         await TryCreateHypertable(conn, "tasks", "created_at", $"{_options.ChunkIntervalDays} days", cancellationToken);
@@ -311,6 +315,64 @@ public class TimescaleDbRepository : IHistoricalRepository, IAsyncDisposable
         await SetupRetentionPolicy(conn, "buffer_snapshots", cancellationToken);
 
         _logger.LogInformation("TimescaleDB schema initialized successfully");
+    }
+
+    /// <summary>
+    /// Мигрирует PK таблицы tasks: если PK только по id, заменяет на (id, created_at)
+    /// для совместимости с TimescaleDB partitioning.
+    /// </summary>
+    private async Task MigrateTasksPrimaryKey(NpgsqlConnection conn, CancellationToken ct)
+    {
+        try
+        {
+            // Проверяем, входит ли created_at в текущий PK
+            var checkSql = @"
+                SELECT COUNT(*) FROM information_schema.key_column_usage kcu
+                JOIN information_schema.table_constraints tc
+                  ON kcu.constraint_name = tc.constraint_name
+                 AND kcu.table_schema = tc.table_schema
+                WHERE tc.table_name = 'tasks'
+                  AND tc.constraint_type = 'PRIMARY KEY'
+                  AND kcu.column_name = 'created_at';";
+
+            await using var cmd = new NpgsqlCommand(checkSql, conn);
+            var result = await cmd.ExecuteScalarAsync(ct);
+            var hasCreatedAtInPk = Convert.ToInt64(result) > 0;
+
+            if (!hasCreatedAtInPk)
+            {
+                // Проверяем, является ли таблица уже hypertable
+                var isHypertable = false;
+                try
+                {
+                    await using var cmd2 = new NpgsqlCommand(
+                        "SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = 'tasks' LIMIT 1;", conn);
+                    var r2 = await cmd2.ExecuteScalarAsync(ct);
+                    isHypertable = r2 != null;
+                }
+                catch { /* view may not exist */ }
+
+                if (!isHypertable)
+                {
+                    _logger.LogInformation("Migrating tasks PK to include created_at for TimescaleDB compatibility");
+                    // Находим имя текущего constraint
+                    await using var cmd3 = new NpgsqlCommand(
+                        "SELECT constraint_name FROM information_schema.table_constraints WHERE table_name = 'tasks' AND constraint_type = 'PRIMARY KEY';", conn);
+                    var pkName = (string?)await cmd3.ExecuteScalarAsync(ct);
+
+                    if (pkName != null)
+                    {
+                        await ExecuteNonQueryAsync(conn, $"ALTER TABLE tasks DROP CONSTRAINT {pkName};", ct);
+                        await ExecuteNonQueryAsync(conn, "ALTER TABLE tasks ADD PRIMARY KEY (id, created_at);", ct);
+                        _logger.LogInformation("Tasks PK migrated to (id, created_at)");
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not migrate tasks PK, hypertable may already be configured");
+        }
     }
 
     private async Task TryCreateHypertable(NpgsqlConnection conn, string table, string timeColumn,
