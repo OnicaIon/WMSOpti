@@ -929,7 +929,7 @@ Function GetWaveTasks(Request)
     |   Task.Assignee.Description AS AssigneeName,
     |   Task.Template.Code AS TemplateCode,
     |   CASE
-    |       WHEN Task.Template.Code = ""029""
+    |       WHEN Task.PrevTask = UNDEFINED
     |           THEN ""Replenishment""
     |       ELSE ""Distribution""
     |   END AS TaskType
