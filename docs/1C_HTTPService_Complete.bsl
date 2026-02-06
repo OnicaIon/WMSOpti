@@ -929,7 +929,8 @@ Function GetWaveTasks(Request)
     |   Task.Assignee.Description AS AssigneeName,
     |   Task.Template.Code AS TemplateCode,
     |   CASE
-    |       WHEN Task.PrevTask = VALUE(Document.rtWMSProductSelection.EmptyRef)
+    |       WHEN Task.PrevTask IS NULL
+    |           OR Task.PrevTask = VALUE(Document.rtWMSProductSelection.EmptyRef)
     |           THEN ""Replenishment""
     |       ELSE ""Distribution""
     |   END AS TaskType
@@ -954,31 +955,27 @@ Function GetWaveTasks(Request)
 
         TaskRef = TasksSelection.Task;
 
-        // Get plan actions and fact (sgTaskAction)
+        // Get actions from sgTaskAction directly (contains both plan and fact data)
         ActionsQuery = New Query;
         ActionsQuery.Text =
         "SELECT
-        |   ISNULL(PlanAction.StorageBin.Code, """") AS StorageBin,
-        |   ISNULL(PlanAction.AllocationBin.Code, """") AS AllocationBin,
-        |   ISNULL(PlanAction.StorageProduct.Product.Code, """") AS ProductCode,
-        |   ISNULL(PlanAction.StorageProduct.Product.Description, """") AS ProductName,
-        |   ISNULL(PlanAction.StorageProduct.Product.Weight, 0) AS ProductWeight,
-        |   ISNULL(PlanAction.Qty, 0) AS QtyPlan,
-        |   ISNULL(PlanAction.SortOrder, 0) AS SortOrder,
-        |   ISNULL(Fact.Qty, 0) AS QtyFact,
-        |   Fact.CompletedAt AS FactCompletedAt,
-        |   Fact.StartedAt AS FactStartedAt
+        |   ISNULL(Action.StorageBin.Code, """") AS StorageBin,
+        |   ISNULL(Action.AllocationBin.Code, """") AS AllocationBin,
+        |   ISNULL(Action.StorageProduct.Product.Code, """") AS ProductCode,
+        |   ISNULL(Action.StorageProduct.Product.Description, """") AS ProductName,
+        |   ISNULL(Action.StorageProduct.Product.Weight, 0) AS ProductWeight,
+        |   ISNULL(Action.Qty, 0) AS QtyPlan,
+        |   ISNULL(Action.Qty, 0) AS QtyFact,
+        |   0 AS SortOrder,
+        |   Action.CompletedAt AS FactCompletedAt,
+        |   Action.StartedAt AS FactStartedAt
         |FROM
-        |   Document.rtWMSProductSelection.PlanActions AS PlanAction
-        |       LEFT JOIN Document.sgTaskAction AS Fact
-        |       ON Fact.TaskBasis = &TaskRef
-        |           AND Fact.AllocationBin = PlanAction.AllocationBin
-        |           AND Fact.StorageProduct = PlanAction.StorageProduct
-        |           AND Fact.Posted
+        |   Document.sgTaskAction AS Action
         |WHERE
-        |   PlanAction.Ref = &TaskRef
+        |   Action.TaskBasis = &TaskRef
+        |   AND Action.Posted
         |ORDER BY
-        |   PlanAction.SortOrder";
+        |   Action.StartedAt";
         ActionsQuery.SetParameter("TaskRef", TaskRef);
 
         ActionsResult = ActionsQuery.Execute();
