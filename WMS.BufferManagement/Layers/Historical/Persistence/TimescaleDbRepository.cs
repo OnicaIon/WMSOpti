@@ -380,9 +380,11 @@ public class TimescaleDbRepository : IHistoricalRepository, IAsyncDisposable
     {
         try
         {
-            await ExecuteNonQueryAsync(conn,
+            // Увеличенный таймаут: migrate_data на больших таблицах может занять минуты
+            await using var cmd = new NpgsqlCommand(
                 $"SELECT create_hypertable('{table}', '{timeColumn}', chunk_time_interval => INTERVAL '{chunkInterval}', if_not_exists => TRUE, migrate_data => TRUE);",
-                ct);
+                conn) { CommandTimeout = 600 };
+            await cmd.ExecuteNonQueryAsync(ct);
         }
         catch (Exception ex)
         {
