@@ -959,9 +959,9 @@ Function GetWaveTasks(Request)
         "SELECT
         |   PlanAction.StorageBin.Code AS StorageBin,
         |   PlanAction.AllocationBin.Code AS AllocationBin,
-        |   PlanAction.StorageProduct.Code AS ProductCode,
-        |   PlanAction.StorageProduct.Description AS ProductName,
-        |   PlanAction.StorageProduct.Weight AS ProductWeight,
+        |   PlanAction.StorageProduct.Product.Code AS ProductCode,
+        |   PlanAction.StorageProduct.Product.Description AS ProductName,
+        |   PlanAction.StorageProduct.Product.Weight AS ProductWeight,
         |   PlanAction.Qty AS QtyPlan,
         |   PlanAction.SortOrder AS SortOrder,
         |   ISNULL(Fact.Qty, 0) AS QtyFact,
