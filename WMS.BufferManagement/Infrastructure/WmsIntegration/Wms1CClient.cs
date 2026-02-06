@@ -574,7 +574,8 @@ public class Wms1CClient : IWms1CClient
         _logger = logger;
 
         _http.BaseAddress = new Uri(_settings.BaseUrl.TrimEnd('/') + "/");
-        _http.Timeout = TimeSpan.FromSeconds(_settings.TimeoutSeconds);
+        // Общий таймаут на HttpClient; отдельные запросы могут управлять через CancellationToken
+        _http.Timeout = TimeSpan.FromMinutes(5);
 
         if (!string.IsNullOrEmpty(_settings.ApiKey))
         {
@@ -753,7 +754,27 @@ public class Wms1CClient : IWms1CClient
         CancellationToken ct = default)
     {
         var url = $"wave-tasks?wave={Uri.EscapeDataString(waveNumber.Trim())}";
-        return await GetAsync<Services.Backtesting.WaveTasksResponse>(url, ct);
+        // Увеличенный таймаут: волны могут содержать сотни заданий, 1С обрабатывает долго
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromMinutes(5));
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            var response = await _http.SendAsync(request, cts.Token);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("WMS API error: {StatusCode} for {Url}", response.StatusCode, url);
+                return null;
+            }
+
+            return await response.Content.ReadFromJsonAsync<Services.Backtesting.WaveTasksResponse>(_jsonOptions, cts.Token);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error calling WMS API: {Url}", url);
+            throw;
+        }
     }
 
     private string BuildUrl(string endpoint, string? afterId = null, int? limit = null)
