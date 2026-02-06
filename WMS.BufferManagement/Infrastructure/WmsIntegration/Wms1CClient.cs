@@ -752,7 +752,7 @@ public class Wms1CClient : IWms1CClient
         string waveNumber,
         CancellationToken ct = default)
     {
-        var url = $"wave-tasks?wave={Uri.EscapeDataString(waveNumber)}";
+        var url = $"wave-tasks?wave={Uri.EscapeDataString(waveNumber.Trim())}";
         return await GetAsync<Services.Backtesting.WaveTasksResponse>(url, ct);
     }
 

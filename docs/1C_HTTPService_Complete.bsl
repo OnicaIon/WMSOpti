@@ -900,7 +900,7 @@ Function GetWaveTasks(Request)
     |   Document.sgDistributionWave AS Wave
     |WHERE
     |   Wave.Number = &WaveNumber";
-    WaveQuery.SetParameter("WaveNumber", WaveNumber);
+    WaveQuery.SetParameter("WaveNumber", TrimAll(WaveNumber));
 
     WaveResult = WaveQuery.Execute();
     If WaveResult.IsEmpty() Then
