@@ -17,7 +17,9 @@ EndFunction
 Function StructureToJSON(Structure)
     JSONWriter = New JSONWriter;
     JSONWriter.SetString();
-    WriteJSON(JSONWriter, Structure);
+    JSONConversionSettings = New JSONSerializerSettings;
+    JSONConversionSettings.SerializeDate = JSONDateFormat.ISO;
+    WriteJSON(JSONWriter, Structure, JSONConversionSettings);
     Return JSONWriter.Close();
 EndFunction
 
@@ -957,13 +959,13 @@ Function GetWaveTasks(Request)
         ActionsQuery = New Query;
         ActionsQuery.Text =
         "SELECT
-        |   PlanAction.StorageBin.Code AS StorageBin,
-        |   PlanAction.AllocationBin.Code AS AllocationBin,
-        |   PlanAction.StorageProduct.Product.Code AS ProductCode,
-        |   PlanAction.StorageProduct.Product.Description AS ProductName,
-        |   PlanAction.StorageProduct.Product.Weight AS ProductWeight,
-        |   PlanAction.Qty AS QtyPlan,
-        |   PlanAction.SortOrder AS SortOrder,
+        |   ISNULL(PlanAction.StorageBin.Code, """") AS StorageBin,
+        |   ISNULL(PlanAction.AllocationBin.Code, """") AS AllocationBin,
+        |   ISNULL(PlanAction.StorageProduct.Product.Code, """") AS ProductCode,
+        |   ISNULL(PlanAction.StorageProduct.Product.Description, """") AS ProductName,
+        |   ISNULL(PlanAction.StorageProduct.Product.Weight, 0) AS ProductWeight,
+        |   ISNULL(PlanAction.Qty, 0) AS QtyPlan,
+        |   ISNULL(PlanAction.SortOrder, 0) AS SortOrder,
         |   ISNULL(Fact.Qty, 0) AS QtyFact,
         |   Fact.CompletedAt AS FactCompletedAt,
         |   Fact.StartedAt AS FactStartedAt
@@ -991,10 +993,10 @@ Function GetWaveTasks(Request)
             Action.Insert("allocationBin", String(ActionsSelection.AllocationBin));
             Action.Insert("productCode",   String(ActionsSelection.ProductCode));
             Action.Insert("productName",   String(ActionsSelection.ProductName));
-            Action.Insert("weightKg",      ActionsSelection.ProductWeight);
-            Action.Insert("qtyPlan",       ActionsSelection.QtyPlan);
-            Action.Insert("qtyFact",       ActionsSelection.QtyFact);
-            Action.Insert("sortOrder",     ActionsSelection.SortOrder);
+            Action.Insert("weightKg",      Number(ActionsSelection.ProductWeight));
+            Action.Insert("qtyPlan",       Number(ActionsSelection.QtyPlan));
+            Action.Insert("qtyFact",       Number(ActionsSelection.QtyFact));
+            Action.Insert("sortOrder",     Number(ActionsSelection.SortOrder));
             Action.Insert("completedAt",   FormatDateISO8601(ActionsSelection.FactCompletedAt));
             Action.Insert("startedAt",     FormatDateISO8601(ActionsSelection.FactStartedAt));
 
