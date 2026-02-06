@@ -403,8 +403,7 @@ public class WaveBacktestService
                 OriginalWorker = g.First().OriginalWorkerCode,
                 OriginalWorkerName = g.First().OriginalWorkerName
             })
-            .OrderByDescending(g => g.TotalDurationSec) // LPT: длинные задачи первыми
-            .ToList();
+            .ToList(); // сортировка LPT — после масштабирования
 
         var distTaskGroups = dayActions
             .Where(a => a.TaskType == "Distribution")
@@ -420,11 +419,48 @@ public class WaveBacktestService
             })
             .ToList();
 
-        // === Capacity работников: merged intervals за день (не sum DurationSec) ===
-        // Учитывает перекрытие timestamps — даёт реальное wall-clock время работника
-        var workerCapacities = dayActions
-            .GroupBy(a => a.OriginalWorkerCode)
-            .ToDictionary(g => g.Key, g => ComputeWorkerDayCapacitySec(g.ToList()));
+        // === Масштабирование длительностей task groups ===
+        // Несколько task groups одного работника могут перекрываться по времени в 1С
+        // (параллельные задачи). Масштабируем пропорционально:
+        // сумма scaled-длительностей по работнику = его merged interval (реальное время).
+        var scaledGroupDurations = new Dictionary<string, double>();
+
+        // Repl: per-worker merged interval → масштабирование
+        var replWorkerCapacities = new Dictionary<string, double>();
+        foreach (var wg in replTaskGroups.GroupBy(g => g.OriginalWorker))
+        {
+            var workerReplActions = dayActions
+                .Where(a => a.OriginalWorkerCode == wg.Key && a.TaskType == "Replenishment").ToList();
+            var replCapacity = ComputeWorkerDayCapacitySec(workerReplActions);
+            replWorkerCapacities[wg.Key] = replCapacity;
+            var rawTotal = wg.Sum(g => g.TotalDurationSec);
+            var scale = rawTotal > 0 ? replCapacity / rawTotal : 1.0;
+            foreach (var g in wg)
+                scaledGroupDurations[g.TaskGroupRef] = g.TotalDurationSec * scale;
+        }
+
+        // Dist: per-worker merged interval → масштабирование
+        var distWorkerCapacities = new Dictionary<string, double>();
+        foreach (var wg in distTaskGroups.GroupBy(g => g.OriginalWorker))
+        {
+            var workerDistActions = dayActions
+                .Where(a => a.OriginalWorkerCode == wg.Key && a.TaskType == "Distribution").ToList();
+            var distCapacity = ComputeWorkerDayCapacitySec(workerDistActions);
+            distWorkerCapacities[wg.Key] = distCapacity;
+            var rawTotal = wg.Sum(g => g.TotalDurationSec);
+            var scale = rawTotal > 0 ? distCapacity / rawTotal : 1.0;
+            foreach (var g in wg)
+                scaledGroupDurations[g.TaskGroupRef] = g.TotalDurationSec * scale;
+        }
+
+        // Хелпер: масштабированная длительность группы
+        double Scaled(string taskGroupRef, double fallback) =>
+            scaledGroupDurations.GetValueOrDefault(taskGroupRef, fallback);
+
+        // LPT сортировка по масштабированной длительности
+        replTaskGroups = replTaskGroups
+            .OrderByDescending(g => Scaled(g.TaskGroupRef, g.TotalDurationSec))
+            .ToList();
 
         // Форклифт-работники (только те, у кого есть repl-действия в этот день)
         var forkliftWorkerCodes = replTaskGroups
@@ -443,7 +479,7 @@ public class WaveBacktestService
         // ================================================================
         var forkliftLoad = forkliftWorkerCodes.ToDictionary(c => c, _ => 0.0);
         var forkliftRemaining = forkliftWorkerCodes.ToDictionary(
-            c => c, c => workerCapacities.GetValueOrDefault(c, 0.0));
+            c => c, c => replWorkerCapacities.GetValueOrDefault(c, 0.0));
         var replFinishTimes = new Dictionary<string, double>(); // taskGroupRef → finish time
 
         foreach (var rg in replTaskGroups)
@@ -453,8 +489,9 @@ public class WaveBacktestService
                 .OrderByDescending(kv => kv.Value)
                 .First().Key;
 
-            forkliftLoad[bestWorker] += rg.TotalDurationSec;
-            forkliftRemaining[bestWorker] -= rg.TotalDurationSec;
+            var scaledReplDur = Scaled(rg.TaskGroupRef, rg.TotalDurationSec);
+            forkliftLoad[bestWorker] += scaledReplDur;
+            forkliftRemaining[bestWorker] -= scaledReplDur;
 
             // Время окончания этого repl-задания = cumulative load форклифта
             replFinishTimes[rg.TaskGroupRef] = forkliftLoad[bestWorker];
@@ -507,7 +544,7 @@ public class WaveBacktestService
         // ================================================================
         var pickerFinishTime = pickerWorkerCodes.ToDictionary(c => c, _ => 0.0);
         var pickerRemaining = pickerWorkerCodes.ToDictionary(
-            c => c, c => workerCapacities.GetValueOrDefault(c, 0.0));
+            c => c, c => distWorkerCapacities.GetValueOrDefault(c, 0.0));
 
         // Сортируем dist-задачи по времени доступности (когда repl завершился)
         var sortedDistGroups = distTaskGroups
@@ -541,8 +578,9 @@ public class WaveBacktestService
 
             var pickerPause = pickerFinishTime[bestPicker] > 0 ? PickerTransitionTimeSec : 0;
             var startTime = Math.Max(pickerFinishTime[bestPicker] + pickerPause, replFinish);
-            pickerFinishTime[bestPicker] = startTime + dg.TotalDurationSec;
-            pickerRemaining[bestPicker] -= dg.TotalDurationSec;
+            var scaledDistDur = Scaled(dg.TaskGroupRef, dg.TotalDurationSec);
+            pickerFinishTime[bestPicker] = startTime + scaledDistDur;
+            pickerRemaining[bestPicker] -= scaledDistDur;
 
             if (!assignments.ContainsKey(bestPicker))
                 assignments[bestPicker] = new List<ActionTiming>();

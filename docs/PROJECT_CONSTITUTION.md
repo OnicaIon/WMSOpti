@@ -55,6 +55,22 @@ NotStarted → ReplInProgress → WaitDist → DistInProgress → Completed
 3. `route_stats` — средняя длительность маршрута (зона→зона) из БД (минимум 3 поездки)
 4. `default` — среднее по волне (waveMeanDurationSec)
 
+### Масштабирование длительностей task groups
+Действия в 1С записываются с перекрывающимися timestamps (параллельные задачи).
+`ComputeGroupSpanSec` даёт wall-clock span одной группы, но несколько групп одного
+работника могут работать одновременно → сумма spans >> реальное время.
+
+**Решение:** пропорциональное масштабирование:
+```
+rawTotal = сумма ComputeGroupSpanSec по группам работника (одного типа)
+mergedInterval = ComputeWorkerDayCapacitySec (merged intervals работника)
+scaleFactor = mergedInterval / rawTotal
+scaledDuration[group] = rawSpan[group] × scaleFactor
+→ сумма scaled по работнику = mergedInterval ✓
+```
+
+Масштабирование раздельное для repl и dist (forklift capacity → repl groups, picker capacity → dist groups).
+
 ### Формула улучшения
 ```
 ActualActive = сумма per-day merged intervals
@@ -66,7 +82,7 @@ ImprovementPercent = (ActualActive - OptimizedDuration) / ActualActive × 100%
 
 | Константа | Значение | Описание |
 |-----------|----------|----------|
-| PickerTransitionTimeSec | 60 | Пауза между палетами у пикера |
+| PickerTransitionTimeSec | 0 (было 60) | Пауза между палетами у пикера (временно выключена) |
 | DefaultRouteDurationSec | 120 | Fallback если нет статистики (используется редко) |
 | Bin code формат | `01A-01-02-03` | Зона = символы после "01" (например "A") |
 
