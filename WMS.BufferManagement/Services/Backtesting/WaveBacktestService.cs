@@ -1,5 +1,7 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using WMS.BufferManagement.Domain.Entities;
+using WMS.BufferManagement.Infrastructure.Configuration;
 using WMS.BufferManagement.Infrastructure.WmsIntegration;
 using WMS.BufferManagement.Layers.Historical.Persistence;
 using WMS.BufferManagement.Layers.Historical.Persistence.Models;
@@ -9,32 +11,32 @@ namespace WMS.BufferManagement.Services.Backtesting;
 
 /// <summary>
 /// Сервис бэктестирования волн дистрибьюции.
-/// Оптимизация по дням с учётом доступности работников и связки repl→dist.
+/// Кросс-дневная оптимизация: все палеты = пул, работники ограничены днём/сменой, буфер ≤ capacity.
 /// READ-ONLY: не модифицирует данные в БД.
 /// </summary>
 public class WaveBacktestService
 {
     private readonly IWms1CClient _wmsClient;
     private readonly IHistoricalRepository _repository;
-    private readonly PalletAssignmentOptimizer _optimizer; // сохраняем для DI-совместимости
+    private readonly PalletAssignmentOptimizer _optimizer;
     private readonly ILogger<WaveBacktestService> _logger;
+    private readonly int _bufferCapacity;
 
-    // Пауза между палетами у пикера (переход, сканирование)
-    // TODO: пока 0 — чтобы сравнение было чистым (паузы одинаковы в факте и оптимизации)
     private const double PickerTransitionTimeSec = 0.0;
-    // Значение по умолчанию, если нет статистики маршрута
     private const double DefaultRouteDurationSec = 120.0;
 
     public WaveBacktestService(
         IWms1CClient wmsClient,
         IHistoricalRepository repository,
         PalletAssignmentOptimizer optimizer,
-        ILogger<WaveBacktestService> logger)
+        ILogger<WaveBacktestService> logger,
+        IOptions<BufferConfig> bufferConfig)
     {
         _wmsClient = wmsClient;
         _repository = repository;
         _optimizer = optimizer;
         _logger = logger;
+        _bufferCapacity = bufferConfig.Value.Capacity;
     }
 
     // ============================================================================
@@ -56,6 +58,22 @@ public class WaveBacktestService
         public string TemplateCode => Group.TemplateCode;
         public string TaskGroupRef => Group.TaskRef;
         public string PrevTaskRef => Group.PrevTaskRef;
+    }
+
+    /// <summary>
+    /// Информация о task group для кросс-дневной оптимизации
+    /// </summary>
+    private class TaskGroupInfo
+    {
+        public string TaskGroupRef { get; set; } = string.Empty;
+        public string PrevTaskRef { get; set; } = string.Empty;
+        public string TaskType { get; set; } = string.Empty;
+        public double DurationSec { get; set; }
+        public double WeightKg { get; set; }
+        public double Priority { get; set; }
+        public string OriginalWorker { get; set; } = string.Empty;
+        public string OriginalWorkerName { get; set; } = string.Empty;
+        public List<AnnotatedAction> Actions { get; set; } = new();
     }
 
     // ============================================================================
@@ -89,12 +107,14 @@ public class WaveBacktestService
         _logger.LogInformation("Статистика: {Routes} маршрутов, {Pickers} пикер-товар",
             routeStats.Count, pickerStats.Count);
 
-        // 4. Оптимизировать по дням (двухстадийный LPT/EFF с capacity)
+        // 4. Кросс-дневная оптимизация с буфером
         var (optimizedPlan, simulatedTimeline, dayBreakdowns) =
-            OptimizeByDays(waveData, actualTimeline, routeStats, pickerStats);
+            OptimizeCrossDay(waveData, actualTimeline, routeStats, pickerStats);
 
-        _logger.LogInformation("Оптимизация по {Days} дням, makespan: {Duration}",
-            dayBreakdowns.Count, simulatedTimeline.TotalDuration);
+        var optDays = dayBreakdowns.Count(d => d.OptimizedReplGroups + d.OptimizedDistGroups > 0);
+        var origDays = dayBreakdowns.Count(d => d.OriginalReplGroups + d.OriginalDistGroups > 0);
+        _logger.LogInformation("Кросс-дневная оптимизация: {OptDays}/{OrigDays} дней, буфер {Cap}",
+            optDays, origDays, _bufferCapacity);
 
         // 5. Собрать результат
         var result = BuildResult(waveData, actualTimeline, simulatedTimeline,
@@ -259,12 +279,11 @@ public class WaveBacktestService
     }
 
     /// <summary>
-    /// Оптимизация по дням: двухстадийный scheduling
-    /// 1) Replenishment → форклифты (LPT + capacity)
-    /// 2) Distribution → пикеры (EFF + precedence + 1мин пауза)
+    /// Кросс-дневная оптимизация: все палеты = пул, работники ограничены днём,
+    /// буфер ≤ capacity. Каждый день заполняется из пула до исчерпания capacity.
     /// </summary>
     private (OptimizedPlan plan, SimulatedTimeline simulated, List<DayBreakdown> dayBreakdowns)
-        OptimizeByDays(
+        OptimizeCrossDay(
             WaveTasksResponse waveData,
             ActualTimeline actualTimeline,
             List<RouteStatistics> routeStats,
@@ -272,13 +291,6 @@ public class WaveBacktestService
     {
         var allAnnotated = BuildAnnotatedActions(waveData);
 
-        // Группировка по дням
-        var dayGroups = allAnnotated
-            .GroupBy(a => a.Day)
-            .OrderBy(g => g.Key)
-            .ToList();
-
-        // Lookup-таблицы для оценки времени
         var routeLookup = routeStats
             .GroupBy(r => $"{r.FromZone}→{r.ToZone}")
             .ToDictionary(g => g.Key, g => g.First());
@@ -286,35 +298,203 @@ public class WaveBacktestService
             .GroupBy(p => $"{p.PickerId}:{p.ProductSku}")
             .ToDictionary(g => g.Key, g => g.First());
 
-        // Среднее фактическое время действия — для default fallback
         var allDurations = allAnnotated.Where(a => a.DurationSec > 0).Select(a => a.DurationSec).ToList();
         var waveMeanDurationSec = allDurations.Any() ? allDurations.Average() : DefaultRouteDurationSec;
+
+        // === Построить task groups с масштабированными длительностями ===
+        var replGroupsRaw = allAnnotated
+            .Where(a => a.TaskType == "Replenishment")
+            .GroupBy(a => a.TaskGroupRef)
+            .Select(g => new
+            {
+                TaskGroupRef = g.Key,
+                Actions = g.ToList(),
+                RawDurationSec = ComputeGroupSpanSec(g.ToList()),
+                OriginalWorker = g.First().OriginalWorkerCode,
+                OriginalWorkerName = g.First().OriginalWorkerName,
+                Day = g.First().Day,
+                WeightKg = (double)g.Sum(a => a.Action.WeightKg)
+            }).ToList();
+
+        var distGroupsRaw = allAnnotated
+            .Where(a => a.TaskType == "Distribution")
+            .GroupBy(a => a.TaskGroupRef)
+            .Select(g => new
+            {
+                TaskGroupRef = g.Key,
+                PrevTaskRef = g.First().PrevTaskRef,
+                Actions = g.ToList(),
+                RawDurationSec = ComputeGroupSpanSec(g.ToList()),
+                OriginalWorker = g.First().OriginalWorkerCode,
+                OriginalWorkerName = g.First().OriginalWorkerName,
+                Day = g.First().Day,
+                WeightKg = (double)g.Sum(a => a.Action.WeightKg)
+            }).ToList();
+
+        // Масштабирование: per-worker-per-day sum(scaled) = merged interval
+        var scaledDurations = new Dictionary<string, double>();
+
+        foreach (var wg in replGroupsRaw.GroupBy(g => (g.OriginalWorker, g.Day)))
+        {
+            var workerActions = allAnnotated
+                .Where(a => a.OriginalWorkerCode == wg.Key.OriginalWorker
+                    && a.Day == wg.Key.Day && a.TaskType == "Replenishment").ToList();
+            var capacity = ComputeWorkerDayCapacitySec(workerActions);
+            var rawTotal = wg.Sum(g => g.RawDurationSec);
+            var scale = rawTotal > 0 ? capacity / rawTotal : 1.0;
+            foreach (var g in wg)
+                scaledDurations[g.TaskGroupRef] = g.RawDurationSec * scale;
+        }
+
+        foreach (var wg in distGroupsRaw.GroupBy(g => (g.OriginalWorker, g.Day)))
+        {
+            var workerActions = allAnnotated
+                .Where(a => a.OriginalWorkerCode == wg.Key.OriginalWorker
+                    && a.Day == wg.Key.Day && a.TaskType == "Distribution").ToList();
+            var capacity = ComputeWorkerDayCapacitySec(workerActions);
+            var rawTotal = wg.Sum(g => g.RawDurationSec);
+            var scale = rawTotal > 0 ? capacity / rawTotal : 1.0;
+            foreach (var g in wg)
+                scaledDurations[g.TaskGroupRef] = g.RawDurationSec * scale;
+        }
+
+        // Построить TaskGroupInfo с приоритетами
+        var replGroups = replGroupsRaw.Select(g =>
+        {
+            var tgi = new TaskGroupInfo
+            {
+                TaskGroupRef = g.TaskGroupRef,
+                TaskType = "Replenishment",
+                DurationSec = scaledDurations.GetValueOrDefault(g.TaskGroupRef, g.RawDurationSec),
+                WeightKg = g.WeightKg,
+                OriginalWorker = g.OriginalWorker,
+                OriginalWorkerName = g.OriginalWorkerName,
+                Actions = g.Actions
+            };
+            tgi.Priority = CalculatePriority(tgi, routeLookup);
+            return tgi;
+        }).OrderByDescending(g => g.Priority).ToList();
+
+        var distGroups = distGroupsRaw.Select(g =>
+        {
+            var tgi = new TaskGroupInfo
+            {
+                TaskGroupRef = g.TaskGroupRef,
+                PrevTaskRef = g.PrevTaskRef,
+                TaskType = "Distribution",
+                DurationSec = scaledDurations.GetValueOrDefault(g.TaskGroupRef, g.RawDurationSec),
+                WeightKg = g.WeightKg,
+                OriginalWorker = g.OriginalWorker,
+                OriginalWorkerName = g.OriginalWorkerName,
+                Actions = g.Actions
+            };
+            tgi.Priority = CalculatePriority(tgi, routeLookup);
+            return tgi;
+        }).ToList();
+
+        // === Worker-day capacity ===
+        var workerDayData = allAnnotated
+            .GroupBy(a => (a.OriginalWorkerCode, a.Day))
+            .Select(g =>
+            {
+                var workerType = g.First().TemplateCode == "029" ? "Forklift"
+                    : g.First().TemplateCode == "031" ? "Picker" : "Unknown";
+                return new
+                {
+                    WorkerCode = g.Key.OriginalWorkerCode,
+                    WorkerName = g.First().OriginalWorkerName,
+                    WorkerType = workerType,
+                    Day = g.Key.Day,
+                    CapacitySec = ComputeWorkerDayCapacitySec(g.ToList())
+                };
+            }).ToList();
+
+        var allDays = workerDayData.Select(w => w.Day).Distinct().OrderBy(d => d).ToList();
+
+        // Фактические подсчёты по дням (для сравнения)
+        var originalDayReplGroups = allAnnotated
+            .Where(a => a.TaskType == "Replenishment")
+            .GroupBy(a => a.Day)
+            .ToDictionary(g => g.Key, g => g.Select(a => a.TaskGroupRef).Distinct().Count());
+        var originalDayDistGroups = allAnnotated
+            .Where(a => a.TaskType == "Distribution")
+            .GroupBy(a => a.Day)
+            .ToDictionary(g => g.Key, g => g.Select(a => a.TaskGroupRef).Distinct().Count());
+
+        var workerNames = allAnnotated
+            .GroupBy(a => a.OriginalWorkerCode)
+            .ToDictionary(g => g.Key, g => g.First().OriginalWorkerName);
+
+        // === Кросс-дневная симуляция ===
+        var replPool = new List<TaskGroupInfo>(replGroups); // отсортированы по Priority ↓
+        var distPool = new List<TaskGroupInfo>(distGroups);
+        var completedRepl = new HashSet<string>();
+        int bufferLevel = 0;
 
         var mergedPlan = new OptimizedPlan { IsOptimal = true };
         var allSimWorkers = new List<SimulatedWorkerTimeline>();
         var dayBreakdowns = new List<DayBreakdown>();
 
-        foreach (var dayGroup in dayGroups)
+        foreach (var day in allDays)
         {
-            var day = dayGroup.Key;
-            var dayActions = dayGroup.ToList();
+            var bufferStart = bufferLevel;
 
-            // Двухстадийная оптимизация дня
-            var (dayAssignments, daySimWorkers, dayMakespan) = OptimizeDay(
-                dayActions, waveMeanDurationSec, routeLookup, pickerLookup);
+            var dayForklifts = workerDayData
+                .Where(w => w.Day == day && w.WorkerType == "Forklift")
+                .ToDictionary(w => w.WorkerCode, w => w.CapacitySec);
+            var dayPickers = workerDayData
+                .Where(w => w.Day == day && w.WorkerType == "Picker")
+                .ToDictionary(w => w.WorkerCode, w => w.CapacitySec);
 
-            // Merge назначений в общий план
-            foreach (var (workerCode, actions) in dayAssignments)
+            int replDone = 0, distDone = 0;
+            var dayAssignments = new Dictionary<string, List<ActionTiming>>();
+            var dayMakespan = TimeSpan.Zero;
+
+            if ((replPool.Any() || distPool.Any()) && (dayForklifts.Any() || dayPickers.Any()))
             {
-                if (!mergedPlan.WorkerAssignments.ContainsKey(workerCode))
-                    mergedPlan.WorkerAssignments[workerCode] = new List<ActionTiming>();
-                mergedPlan.WorkerAssignments[workerCode].AddRange(actions);
+                (replDone, distDone, dayAssignments, dayMakespan) = SimulateDay(
+                    replPool, distPool, completedRepl,
+                    dayForklifts, dayPickers,
+                    ref bufferLevel, _bufferCapacity);
+
+                // Merge assignments
+                foreach (var (wc, actions) in dayAssignments)
+                {
+                    if (!mergedPlan.WorkerAssignments.ContainsKey(wc))
+                        mergedPlan.WorkerAssignments[wc] = new List<ActionTiming>();
+                    mergedPlan.WorkerAssignments[wc].AddRange(actions);
+                }
+
+                // SimulatedWorkerTimeline для этого дня
+                foreach (var (wc, actions) in dayAssignments)
+                {
+                    if (!actions.Any()) continue;
+                    var swt = new SimulatedWorkerTimeline
+                    {
+                        WorkerCode = wc,
+                        WorkerName = workerNames.GetValueOrDefault(wc, ""),
+                        Duration = TimeSpan.FromSeconds(actions.Sum(a => a.DurationSec)),
+                        TaskCount = actions.Count
+                    };
+                    foreach (var at in actions)
+                    {
+                        var (estSec, source) = EstimateActionDuration(
+                            at, wc, routeLookup, pickerLookup, waveMeanDurationSec);
+                        swt.Actions.Add(new SimulatedAction
+                        {
+                            FromBin = at.FromBin, ToBin = at.ToBin,
+                            FromZone = at.FromZone, ToZone = at.ToZone,
+                            ProductCode = at.ProductCode, WeightKg = at.WeightKg,
+                            EstimatedDurationSec = estSec, DurationSource = source
+                        });
+                    }
+                    allSimWorkers.Add(swt);
+                }
             }
 
-            allSimWorkers.AddRange(daySimWorkers);
-
-            // Фактическое активное время за день (merged intervals)
-            var dayActualIntervals = dayActions
+            // Фактические метрики дня
+            var dayAnnotated = allAnnotated.Where(a => a.Day == day).ToList();
+            var dayActualIntervals = dayAnnotated
                 .Where(a => a.Action.StartedAt.HasValue && a.Action.CompletedAt.HasValue)
                 .Select(a => (start: a.Action.StartedAt!.Value, end: a.Action.CompletedAt!.Value))
                 .Where(i => i.end > i.start)
@@ -326,32 +506,41 @@ public class WaveBacktestService
                 ? ((dayActualActive - dayMakespan).TotalSeconds / dayActualActive.TotalSeconds) * 100
                 : 0;
 
-            var forkliftCount = dayActions.Where(a => a.TaskType == "Replenishment")
-                .Select(a => a.OriginalWorkerCode).Distinct().Count();
-            var pickerCount = dayActions.Where(a => a.TaskType == "Distribution")
-                .Select(a => a.OriginalWorkerCode).Distinct().Count();
+            var origRepl = originalDayReplGroups.GetValueOrDefault(day, 0);
+            var origDist = originalDayDistGroups.GetValueOrDefault(day, 0);
 
             dayBreakdowns.Add(new DayBreakdown
             {
                 Date = day,
-                Workers = dayActions.Select(a => a.OriginalWorkerCode).Distinct().Count(),
-                ForkliftWorkers = forkliftCount,
-                PickerWorkers = pickerCount,
-                ReplActions = dayActions.Count(a => a.TaskType == "Replenishment"),
-                DistActions = dayActions.Count(a => a.TaskType == "Distribution"),
-                TotalActions = dayActions.Count,
+                Workers = dayAnnotated.Select(a => a.OriginalWorkerCode).Distinct().Count(),
+                ForkliftWorkers = dayAnnotated.Where(a => a.TaskType == "Replenishment")
+                    .Select(a => a.OriginalWorkerCode).Distinct().Count(),
+                PickerWorkers = dayAnnotated.Where(a => a.TaskType == "Distribution")
+                    .Select(a => a.OriginalWorkerCode).Distinct().Count(),
+                ReplActions = dayAnnotated.Count(a => a.TaskType == "Replenishment"),
+                DistActions = dayAnnotated.Count(a => a.TaskType == "Distribution"),
+                TotalActions = dayAnnotated.Count,
                 ActualActiveDuration = dayActualActive,
                 OptimizedMakespan = dayMakespan,
-                ImprovementPercent = dayImprovement
+                ImprovementPercent = dayImprovement,
+                OriginalReplGroups = origRepl,
+                OriginalDistGroups = origDist,
+                OptimizedReplGroups = replDone,
+                OptimizedDistGroups = distDone,
+                AdditionalPallets = (replDone + distDone) - (origRepl + origDist),
+                BufferLevelStart = bufferStart,
+                BufferLevelEnd = bufferLevel
             });
         }
 
-        // Агрегация SimulatedWorkerTimeline по работникам (работник может быть в нескольких днях)
-        var simTimeline = new SimulatedTimeline
+        if (replPool.Any() || distPool.Any())
         {
-            WaveMeanDurationSec = waveMeanDurationSec
-        };
+            _logger.LogWarning("Кросс-дневная оптимизация: остались неназначенные задачи — {Repl} repl, {Dist} dist",
+                replPool.Count, distPool.Count);
+        }
 
+        // Агрегация SimulatedWorkerTimeline по работникам
+        var simTimeline = new SimulatedTimeline { WaveMeanDurationSec = waveMeanDurationSec };
         foreach (var wg in allSimWorkers.GroupBy(w => w.WorkerCode))
         {
             simTimeline.WorkerTimelines.Add(new SimulatedWorkerTimeline
@@ -364,272 +553,144 @@ public class WaveBacktestService
             });
         }
 
-        // Общее время = сумма per-day makespans (дни последовательны)
         simTimeline.TotalDuration = TimeSpan.FromSeconds(
-            dayBreakdowns.Sum(d => d.OptimizedMakespan.TotalSeconds));
+            dayBreakdowns.Where(d => d.OptimizedReplGroups + d.OptimizedDistGroups > 0)
+                .Sum(d => d.OptimizedMakespan.TotalSeconds));
 
         return (mergedPlan, simTimeline, dayBreakdowns);
     }
 
     /// <summary>
-    /// Оптимизировать один день — двухстадийный scheduling:
-    /// Стадия 1: Replenishment → форклифты (LPT greedy + capacity)
-    /// Стадия 2: Distribution → пикеры (EFF + precedence + 1мин пауза + capacity)
+    /// Симуляция одного дня: чередование repl (буфер +1) и dist (буфер -1)
+    /// до исчерпания capacity работников или пула.
     /// </summary>
-    private (
-        Dictionary<string, List<ActionTiming>> assignments,
-        List<SimulatedWorkerTimeline> simWorkers,
-        TimeSpan makespan
-    ) OptimizeDay(
-        List<AnnotatedAction> dayActions,
-        double waveMeanDurationSec,
-        Dictionary<string, RouteStatistics> routeLookup,
-        Dictionary<string, PickerProductStats> pickerLookup)
+    private (int replDone, int distDone, Dictionary<string, List<ActionTiming>> assignments, TimeSpan makespan)
+        SimulateDay(
+            List<TaskGroupInfo> replPool,
+            List<TaskGroupInfo> distPool,
+            HashSet<string> completedRepl,
+            Dictionary<string, double> forkliftCapacity,
+            Dictionary<string, double> pickerCapacity,
+            ref int bufferLevel,
+            int bufferCapacity)
     {
         var assignments = new Dictionary<string, List<ActionTiming>>();
-        var simWorkers = new List<SimulatedWorkerTimeline>();
+        var forkliftLoad = forkliftCapacity.Keys.ToDictionary(k => k, _ => 0.0);
+        var pickerFinishTime = pickerCapacity.Keys.ToDictionary(k => k, _ => 0.0);
+        var forkliftRemaining = new Dictionary<string, double>(forkliftCapacity);
+        var pickerRemaining = new Dictionary<string, double>(pickerCapacity);
 
-        // === Группируем действия по задачам (task groups) ===
-        // Длительность группы = wall-clock span (не sum DurationSec),
-        // т.к. действия в 1С могут иметь перекрывающиеся timestamps
-        var replTaskGroups = dayActions
-            .Where(a => a.TaskType == "Replenishment")
-            .GroupBy(a => a.TaskGroupRef)
-            .Select(g => new
-            {
-                TaskGroupRef = g.Key,
-                Actions = g.ToList(),
-                TotalDurationSec = ComputeGroupSpanSec(g.ToList()),
-                OriginalWorker = g.First().OriginalWorkerCode,
-                OriginalWorkerName = g.First().OriginalWorkerName
-            })
-            .ToList(); // сортировка LPT — после масштабирования
+        int replDone = 0, distDone = 0;
+        const double tolerance = 1.0;
 
-        var distTaskGroups = dayActions
-            .Where(a => a.TaskType == "Distribution")
-            .GroupBy(a => a.TaskGroupRef)
-            .Select(g => new
-            {
-                TaskGroupRef = g.Key,
-                PrevTaskRef = g.First().PrevTaskRef,
-                Actions = g.ToList(),
-                TotalDurationSec = ComputeGroupSpanSec(g.ToList()),
-                OriginalWorker = g.First().OriginalWorkerCode,
-                OriginalWorkerName = g.First().OriginalWorkerName
-            })
-            .ToList();
-
-        // === Масштабирование длительностей task groups ===
-        // Несколько task groups одного работника могут перекрываться по времени в 1С
-        // (параллельные задачи). Масштабируем пропорционально:
-        // сумма scaled-длительностей по работнику = его merged interval (реальное время).
-        var scaledGroupDurations = new Dictionary<string, double>();
-
-        // Repl: per-worker merged interval → масштабирование
-        var replWorkerCapacities = new Dictionary<string, double>();
-        foreach (var wg in replTaskGroups.GroupBy(g => g.OriginalWorker))
+        bool progress = true;
+        while (progress)
         {
-            var workerReplActions = dayActions
-                .Where(a => a.OriginalWorkerCode == wg.Key && a.TaskType == "Replenishment").ToList();
-            var replCapacity = ComputeWorkerDayCapacitySec(workerReplActions);
-            replWorkerCapacities[wg.Key] = replCapacity;
-            var rawTotal = wg.Sum(g => g.TotalDurationSec);
-            var scale = rawTotal > 0 ? replCapacity / rawTotal : 1.0;
-            foreach (var g in wg)
-                scaledGroupDurations[g.TaskGroupRef] = g.TotalDurationSec * scale;
-        }
+            progress = false;
 
-        // Dist: per-worker merged interval → масштабирование
-        var distWorkerCapacities = new Dictionary<string, double>();
-        foreach (var wg in distTaskGroups.GroupBy(g => g.OriginalWorker))
-        {
-            var workerDistActions = dayActions
-                .Where(a => a.OriginalWorkerCode == wg.Key && a.TaskType == "Distribution").ToList();
-            var distCapacity = ComputeWorkerDayCapacitySec(workerDistActions);
-            distWorkerCapacities[wg.Key] = distCapacity;
-            var rawTotal = wg.Sum(g => g.TotalDurationSec);
-            var scale = rawTotal > 0 ? distCapacity / rawTotal : 1.0;
-            foreach (var g in wg)
-                scaledGroupDurations[g.TaskGroupRef] = g.TotalDurationSec * scale;
-        }
-
-        // Хелпер: масштабированная длительность группы
-        double Scaled(string taskGroupRef, double fallback) =>
-            scaledGroupDurations.GetValueOrDefault(taskGroupRef, fallback);
-
-        // LPT сортировка по масштабированной длительности
-        replTaskGroups = replTaskGroups
-            .OrderByDescending(g => Scaled(g.TaskGroupRef, g.TotalDurationSec))
-            .ToList();
-
-        // Форклифт-работники (только те, у кого есть repl-действия в этот день)
-        var forkliftWorkerCodes = replTaskGroups
-            .Select(g => g.OriginalWorker)
-            .Distinct()
-            .ToList();
-
-        // Пикер-работники (только те, у кого есть dist-действия в этот день)
-        var pickerWorkerCodes = distTaskGroups
-            .Select(g => g.OriginalWorker)
-            .Distinct()
-            .ToList();
-
-        // ================================================================
-        // СТАДИЯ 1: Replenishment → форклифты (LPT + capacity)
-        // ================================================================
-        var forkliftLoad = forkliftWorkerCodes.ToDictionary(c => c, _ => 0.0);
-        var forkliftRemaining = forkliftWorkerCodes.ToDictionary(
-            c => c, c => replWorkerCapacities.GetValueOrDefault(c, 0.0));
-        var replFinishTimes = new Dictionary<string, double>(); // taskGroupRef → finish time
-
-        foreach (var rg in replTaskGroups)
-        {
-            // Назначаем форклифту с наибольшим оставшимся capacity
-            var bestWorker = forkliftRemaining
-                .OrderByDescending(kv => kv.Value)
-                .First().Key;
-
-            var scaledReplDur = Scaled(rg.TaskGroupRef, rg.TotalDurationSec);
-            forkliftLoad[bestWorker] += scaledReplDur;
-            forkliftRemaining[bestWorker] -= scaledReplDur;
-
-            // Время окончания этого repl-задания = cumulative load форклифта
-            replFinishTimes[rg.TaskGroupRef] = forkliftLoad[bestWorker];
-
-            // Формируем ActionTiming для назначения
-            if (!assignments.ContainsKey(bestWorker))
-                assignments[bestWorker] = new List<ActionTiming>();
-
-            foreach (var aa in rg.Actions)
+            // === Попытка назначить 1 repl (буфер < capacity, пул не пуст) ===
+            if (bufferLevel < bufferCapacity && replPool.Any())
             {
-                assignments[bestWorker].Add(CreateActionTiming(aa, bestWorker));
-            }
-        }
+                TaskGroupInfo? bestRepl = null;
+                string? bestForklift = null;
 
-        // SimulatedWorkerTimeline для форклифтов
-        foreach (var workerCode in forkliftWorkerCodes)
-        {
-            var workerActions = assignments.GetValueOrDefault(workerCode);
-            if (workerActions == null || !workerActions.Any()) continue;
-
-            var swt = new SimulatedWorkerTimeline
-            {
-                WorkerCode = workerCode,
-                WorkerName = replTaskGroups.FirstOrDefault(g => g.OriginalWorker == workerCode)?.OriginalWorkerName ?? "",
-                Duration = TimeSpan.FromSeconds(forkliftLoad[workerCode]),
-                TaskCount = workerActions.Count
-            };
-
-            foreach (var at in workerActions)
-            {
-                var (estSec, source) = EstimateActionDuration(
-                    at, workerCode, routeLookup, pickerLookup, waveMeanDurationSec);
-                swt.Actions.Add(new SimulatedAction
+                foreach (var rg in replPool)
                 {
-                    FromBin = at.FromBin,
-                    ToBin = at.ToBin,
-                    FromZone = at.FromZone,
-                    ToZone = at.ToZone,
-                    ProductCode = at.ProductCode,
-                    WeightKg = at.WeightKg,
-                    EstimatedDurationSec = estSec,
-                    DurationSource = source
-                });
-            }
-            simWorkers.Add(swt);
-        }
+                    var fk = forkliftRemaining
+                        .Where(kv => kv.Value >= rg.DurationSec - tolerance)
+                        .OrderByDescending(kv => kv.Value)
+                        .Select(kv => kv.Key)
+                        .FirstOrDefault();
 
-        // ================================================================
-        // СТАДИЯ 2: Distribution → пикеры (EFF + precedence + 1мин пауза)
-        // ================================================================
-        var pickerFinishTime = pickerWorkerCodes.ToDictionary(c => c, _ => 0.0);
-        var pickerRemaining = pickerWorkerCodes.ToDictionary(
-            c => c, c => distWorkerCapacities.GetValueOrDefault(c, 0.0));
+                    if (fk != null)
+                    {
+                        bestRepl = rg;
+                        bestForklift = fk;
+                        break; // пул отсортирован по приоритету — берём первый подходящий
+                    }
+                }
 
-        // Сортируем dist-задачи по времени доступности (когда repl завершился)
-        var sortedDistGroups = distTaskGroups
-            .OrderBy(dg =>
-            {
-                if (!string.IsNullOrEmpty(dg.PrevTaskRef) && replFinishTimes.TryGetValue(dg.PrevTaskRef, out var ft))
-                    return ft;
-                return 0.0; // нет связанного repl → доступна сразу
-            })
-            .ToList();
-
-        foreach (var dg in sortedDistGroups)
-        {
-            if (!pickerWorkerCodes.Any()) break;
-
-            // Когда distribution становится доступной?
-            var replFinish = 0.0;
-            if (!string.IsNullOrEmpty(dg.PrevTaskRef) && replFinishTimes.TryGetValue(dg.PrevTaskRef, out var ft))
-                replFinish = ft;
-
-            // Находим пикера с наименьшим временем старта (EFF):
-            // start = max(pickerFinish + 1мин пауза, replFinish)
-            var bestPicker = pickerWorkerCodes
-                .OrderBy(code =>
+                if (bestRepl != null && bestForklift != null)
                 {
-                    var pFinish = pickerFinishTime[code];
-                    var pause = pFinish > 0 ? PickerTransitionTimeSec : 0;
-                    return Math.Max(pFinish + pause, replFinish);
-                })
-                .First();
+                    replPool.Remove(bestRepl);
+                    forkliftLoad[bestForklift] += bestRepl.DurationSec;
+                    forkliftRemaining[bestForklift] -= bestRepl.DurationSec;
+                    completedRepl.Add(bestRepl.TaskGroupRef);
+                    bufferLevel++;
+                    replDone++;
 
-            var pickerPause = pickerFinishTime[bestPicker] > 0 ? PickerTransitionTimeSec : 0;
-            var startTime = Math.Max(pickerFinishTime[bestPicker] + pickerPause, replFinish);
-            var scaledDistDur = Scaled(dg.TaskGroupRef, dg.TotalDurationSec);
-            pickerFinishTime[bestPicker] = startTime + scaledDistDur;
-            pickerRemaining[bestPicker] -= scaledDistDur;
+                    if (!assignments.ContainsKey(bestForklift))
+                        assignments[bestForklift] = new List<ActionTiming>();
+                    foreach (var aa in bestRepl.Actions)
+                        assignments[bestForklift].Add(CreateActionTiming(aa, bestForklift));
 
-            if (!assignments.ContainsKey(bestPicker))
-                assignments[bestPicker] = new List<ActionTiming>();
-
-            foreach (var aa in dg.Actions)
-            {
-                assignments[bestPicker].Add(CreateActionTiming(aa, bestPicker));
+                    progress = true;
+                }
             }
-        }
 
-        // SimulatedWorkerTimeline для пикеров
-        foreach (var workerCode in pickerWorkerCodes)
-        {
-            var workerActions = assignments.GetValueOrDefault(workerCode);
-            if (workerActions == null || !workerActions.Any()) continue;
-
-            var swt = new SimulatedWorkerTimeline
+            // === Попытка назначить 1 dist (буфер > 0, есть готовая задача) ===
+            if (bufferLevel > 0)
             {
-                WorkerCode = workerCode,
-                WorkerName = distTaskGroups.FirstOrDefault(g => g.OriginalWorker == workerCode)?.OriginalWorkerName ?? "",
-                Duration = TimeSpan.FromSeconds(pickerFinishTime[workerCode]),
-                TaskCount = workerActions.Count
-            };
+                var readyDist = distPool
+                    .Where(d => string.IsNullOrEmpty(d.PrevTaskRef) || completedRepl.Contains(d.PrevTaskRef))
+                    .OrderByDescending(d => d.Priority)
+                    .FirstOrDefault();
 
-            foreach (var at in workerActions)
-            {
-                var (estSec, source) = EstimateActionDuration(
-                    at, workerCode, routeLookup, pickerLookup, waveMeanDurationSec);
-                swt.Actions.Add(new SimulatedAction
+                if (readyDist != null)
                 {
-                    FromBin = at.FromBin,
-                    ToBin = at.ToBin,
-                    FromZone = at.FromZone,
-                    ToZone = at.ToZone,
-                    ProductCode = at.ProductCode,
-                    WeightKg = at.WeightKg,
-                    EstimatedDurationSec = estSec,
-                    DurationSource = source
-                });
+                    var bestPicker = pickerRemaining
+                        .Where(kv => kv.Value >= readyDist.DurationSec - tolerance)
+                        .OrderBy(kv => pickerFinishTime[kv.Key])
+                        .Select(kv => kv.Key)
+                        .FirstOrDefault();
+
+                    if (bestPicker != null)
+                    {
+                        distPool.Remove(readyDist);
+                        var pause = pickerFinishTime[bestPicker] > 0 ? PickerTransitionTimeSec : 0;
+                        pickerFinishTime[bestPicker] += pause + readyDist.DurationSec;
+                        pickerRemaining[bestPicker] -= readyDist.DurationSec;
+                        bufferLevel--;
+                        distDone++;
+
+                        if (!assignments.ContainsKey(bestPicker))
+                            assignments[bestPicker] = new List<ActionTiming>();
+                        foreach (var aa in readyDist.Actions)
+                            assignments[bestPicker].Add(CreateActionTiming(aa, bestPicker));
+
+                        progress = true;
+                    }
+                }
             }
-            simWorkers.Add(swt);
         }
 
-        // Makespan = max из всех worker finish times
         var maxForklift = forkliftLoad.Any() ? forkliftLoad.Values.Max() : 0;
         var maxPicker = pickerFinishTime.Any() ? pickerFinishTime.Values.Max() : 0;
         var makespan = TimeSpan.FromSeconds(Math.Max(maxForklift, maxPicker));
 
-        return (assignments, simWorkers, makespan);
+        return (replDone, distDone, assignments, makespan);
+    }
+
+    /// <summary>
+    /// Приоритет палеты: тяжёлые+быстрые первыми, дальние потом
+    /// </summary>
+    private double CalculatePriority(TaskGroupInfo group, Dictionary<string, RouteStatistics> routeLookup)
+    {
+        var weightScore = group.WeightKg * 1000;
+        var speedScore = -group.DurationSec * 10;
+
+        var zoneDistances = group.Actions
+            .Select(a =>
+            {
+                var key = $"{ExtractZone(a.Action.StorageBin)}→{ExtractZone(a.Action.AllocationBin)}";
+                return routeLookup.TryGetValue(key, out var rs)
+                    ? (double)rs.AvgDurationSec
+                    : DefaultRouteDurationSec;
+            })
+            .ToList();
+        var distanceScore = -(zoneDistances.Any() ? zoneDistances.Average() : 0);
+
+        return weightScore + speedScore + distanceScore;
     }
 
     /// <summary>
@@ -755,6 +816,9 @@ public class WaveBacktestService
         var pickerStatsUsed = allSimActions.Count(a => a.DurationSource == "picker_product");
         var defaultUsed = allSimActions.Count(a => a.DurationSource == "default");
 
+        var origWaveDays = dayBreakdowns.Count(d => d.OriginalReplGroups + d.OriginalDistGroups > 0);
+        var optWaveDays = dayBreakdowns.Count(d => d.OptimizedReplGroups + d.OptimizedDistGroups > 0);
+
         return new BacktestResult
         {
             WaveNumber = data.WaveNumber,
@@ -779,7 +843,14 @@ public class WaveBacktestService
             RouteStatsUsed = routeStatsUsed,
             PickerStatsUsed = pickerStatsUsed,
             DefaultEstimatesUsed = defaultUsed,
-            WaveMeanDurationSec = simulated.WaveMeanDurationSec
+            WaveMeanDurationSec = simulated.WaveMeanDurationSec,
+            // Кросс-дневные метрики
+            TotalReplGroups = data.ReplenishmentTasks.Count,
+            TotalDistGroups = data.DistributionTasks.Count,
+            OriginalWaveDays = origWaveDays,
+            OptimizedWaveDays = optWaveDays,
+            DaysSaved = origWaveDays - optWaveDays,
+            BufferCapacity = _bufferCapacity
         };
     }
 

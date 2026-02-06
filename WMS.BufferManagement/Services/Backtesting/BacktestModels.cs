@@ -262,6 +262,18 @@ public class DayBreakdown
     /// <summary>Оптимизированный makespan за день</summary>
     public TimeSpan OptimizedMakespan { get; set; }
     public double ImprovementPercent { get; set; }
+
+    // Палеты (task groups) — факт vs оптимизация
+    public int OriginalReplGroups { get; set; }
+    public int OriginalDistGroups { get; set; }
+    public int OptimizedReplGroups { get; set; }
+    public int OptimizedDistGroups { get; set; }
+    /// <summary>Разница: опт палет - факт палет</summary>
+    public int AdditionalPallets { get; set; }
+
+    // Буфер
+    public int BufferLevelStart { get; set; }
+    public int BufferLevelEnd { get; set; }
 }
 
 // ============================================================================
@@ -315,6 +327,18 @@ public class BacktestResult
     public int DefaultEstimatesUsed { get; set; }
     /// <summary>Среднее фактическое время действия (для default fallback)</summary>
     public double WaveMeanDurationSec { get; set; }
+
+    // Кросс-дневная оптимизация
+    /// <summary>Всего палет (task groups) в волне</summary>
+    public int TotalReplGroups { get; set; }
+    public int TotalDistGroups { get; set; }
+    /// <summary>Факт: за сколько дней выполнена волна</summary>
+    public int OriginalWaveDays { get; set; }
+    /// <summary>Опт: за сколько дней можно выполнить</summary>
+    public int OptimizedWaveDays { get; set; }
+    public int DaysSaved { get; set; }
+    /// <summary>Ёмкость буфера (из конфига)</summary>
+    public int BufferCapacity { get; set; }
 }
 
 /// <summary>

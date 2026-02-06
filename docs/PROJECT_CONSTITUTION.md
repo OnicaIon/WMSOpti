@@ -93,3 +93,39 @@ ImprovementPercent = (ActualActive - OptimizedDuration) / ActualActive × 100%
 - CLI: основной workflow через интерактивное меню (без --flags)
 - Один BSL файл для 1С: `docs/1C_HTTPService_Complete.bsl`
 - Подробный отчёт → файл (reports/), краткий → консоль
+
+## 5. Кросс-дневная оптимизация
+
+### Принцип: палеты из пула, работники из расписания
+- ВСЕ палеты волны = общий пул кандидатов с самого начала
+- Нет понятия "будущих дней" — есть пул палет и расписание работников
+- Работники ограничены сменами (из фактических данных: кто работал, сколько)
+- Буфер ограничен ёмкостью (BufferConfig.Capacity, по умолчанию 50)
+- Каждый день заполняется из пула до исчерпания capacity работников
+
+### Приоритет палет
+```
+score = weightKg * 1000 - durationSec * 10 - zoneDistance
+```
+1. Вес ↓ (тяжёлые первыми — основа палеты, стабильность)
+2. Длительность ↑ (быстрые — не тормозить старт)
+3. Расстояние ↑ (ближние первыми, дальние потом)
+
+### Буфер (producer-consumer)
+```
+Форклифты (producer) → [БУФЕР ≤ capacity] → Пикеры (consumer)
+```
+- Repl завершён → палета в буфер (+1)
+- Dist завершён → палета из буфера (-1)
+- Чередование назначений (interleaved): 1 repl, 1 dist, повторить
+- Буфер переносится между днями
+
+### Связка repl→dist
+- Distribution начинается только ПОСЛЕ завершения своего replenishment
+- PrevTaskRef связывает dist → repl
+- Repl и dist могут быть в разных днях
+
+### Ключевые метрики
+- OriginalWaveDays vs OptimizedWaveDays → DaysSaved
+- Per-day: OriginalPallets vs OptimizedPallets, BufferLevel
+- Формула времени: без изменений (ActualActive vs OptimizedDuration)
