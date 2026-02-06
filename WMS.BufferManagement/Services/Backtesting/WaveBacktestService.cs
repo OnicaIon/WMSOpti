@@ -20,7 +20,8 @@ public class WaveBacktestService
     private readonly ILogger<WaveBacktestService> _logger;
 
     // Пауза между палетами у пикера (переход, сканирование)
-    private const double PickerTransitionTimeSec = 60.0;
+    // TODO: пока 0 — чтобы сравнение было чистым (паузы одинаковы в факте и оптимизации)
+    private const double PickerTransitionTimeSec = 0.0;
     // Значение по умолчанию, если нет статистики маршрута
     private const double DefaultRouteDurationSec = 120.0;
 
