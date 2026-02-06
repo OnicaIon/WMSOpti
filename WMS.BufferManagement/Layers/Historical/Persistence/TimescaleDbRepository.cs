@@ -1400,8 +1400,8 @@ public class TimescaleDbRepository : IHistoricalRepository, IAsyncDisposable
             ORDER BY total_lines DESC";
 
         await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("picker_id", (object?)pickerId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("product_sku", (object?)productSku ?? DBNull.Value);
+        cmd.Parameters.Add(new NpgsqlParameter("picker_id", NpgsqlTypes.NpgsqlDbType.Varchar) { Value = (object?)pickerId ?? DBNull.Value });
+        cmd.Parameters.Add(new NpgsqlParameter("product_sku", NpgsqlTypes.NpgsqlDbType.Varchar) { Value = (object?)productSku ?? DBNull.Value });
         cmd.Parameters.AddWithValue("min_lines", minLines);
 
         var stats = new List<PickerProductStats>();
@@ -1453,7 +1453,7 @@ public class TimescaleDbRepository : IHistoricalRepository, IAsyncDisposable
             ORDER BY total_tasks DESC";
 
         await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("role", (object?)role ?? DBNull.Value);
+        cmd.Parameters.Add(new NpgsqlParameter("role", NpgsqlTypes.NpgsqlDbType.Varchar) { Value = (object?)role ?? DBNull.Value });
 
         var workers = new List<WorkerRecord>();
         await using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -1506,8 +1506,8 @@ public class TimescaleDbRepository : IHistoricalRepository, IAsyncDisposable
             ORDER BY total_trips DESC";
 
         await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("from_zone", (object?)fromZone ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("to_zone", (object?)toZone ?? DBNull.Value);
+        cmd.Parameters.Add(new NpgsqlParameter("from_zone", NpgsqlTypes.NpgsqlDbType.Varchar) { Value = (object?)fromZone ?? DBNull.Value });
+        cmd.Parameters.Add(new NpgsqlParameter("to_zone", NpgsqlTypes.NpgsqlDbType.Varchar) { Value = (object?)toZone ?? DBNull.Value });
         cmd.Parameters.AddWithValue("min_trips", minTrips);
 
         var routes = new List<RouteStatistics>();
