@@ -44,8 +44,22 @@ public static class BacktestReportWriter
             PrintBoxLine(w, $"  РАЗНИЦА:       {result.ImprovementPercent:F1}% ({diffStr})");
         }
 
-        PrintBoxLine(w, $"  Optimizer:     {(result.OptimizerIsOptimal ? "Optimal" : "Feasible")}");
+        PrintBoxLine(w, $"  Метод:         LPT/EFF по дням ({result.DayBreakdowns.Count} дн.)");
         PrintBoxSep(w);
+
+        // Таблица по дням
+        if (result.DayBreakdowns.Any())
+        {
+            PrintBoxLine(w, "  День         Форкл Пикер Действ. Факт     Опт      %");
+            foreach (var db in result.DayBreakdowns)
+            {
+                var factStr = FormatDurationShort(db.ActualActiveDuration);
+                var optStr2 = FormatDurationShort(db.OptimizedMakespan);
+                var sign = db.ImprovementPercent > 0 ? "-" : "+";
+                PrintBoxLine(w, $"  {db.Date:dd.MM.yyyy}  {db.ForkliftWorkers,5} {db.PickerWorkers,5} {db.TotalActions,7} {factStr,-8} {optStr2,-8} {sign}{Math.Abs(db.ImprovementPercent):F0}%");
+            }
+            PrintBoxSep(w);
+        }
 
         // Таблица работников
         PrintBoxLine(w, "  Работник          Факт      Опт       Разница");
@@ -108,8 +122,29 @@ public static class BacktestReportWriter
         sb.AppendLine($"  Факт (работа):         {FormatDuration(result.ActualActiveDuration)} (только активное время)");
         sb.AppendLine($"  Оптимизированное:      {FormatDuration(result.OptimizedDuration)}");
         sb.AppendLine($"  Улучшение:             {result.ImprovementPercent:F1}% ({FormatDuration(result.ImprovementTime)})");
-        sb.AppendLine($"  Optimizer:             {(result.OptimizerIsOptimal ? "Optimal solution" : "Feasible solution")}");
+        sb.AppendLine($"  Метод:                 LPT/EFF по дням ({result.DayBreakdowns.Count} дней)");
         sb.AppendLine();
+
+        // Разбивка по дням
+        if (result.DayBreakdowns.Any())
+        {
+            sb.AppendLine("--- РАЗБИВКА ПО ДНЯМ ---");
+            sb.AppendLine($"  {"Дата",-12} {"Форкл.",7} {"Пикер.",7} {"Repl",7} {"Dist",7} {"Всего",7} {"Факт(работа)",14} {"Оптимизация",14} {"Разница",8}");
+            sb.AppendLine($"  {new string('-', 90)}");
+
+            foreach (var db in result.DayBreakdowns)
+            {
+                var sign = db.ImprovementPercent > 0 ? "-" : "+";
+                sb.AppendLine($"  {db.Date:dd.MM.yyyy}   {db.ForkliftWorkers,7} {db.PickerWorkers,7} {db.ReplActions,7} {db.DistActions,7} {db.TotalActions,7} {FormatDurationShort(db.ActualActiveDuration),14} {FormatDurationShort(db.OptimizedMakespan),14} {sign}{Math.Abs(db.ImprovementPercent):F1}%");
+            }
+
+            // Итого
+            var totalActual = TimeSpan.FromSeconds(result.DayBreakdowns.Sum(d => d.ActualActiveDuration.TotalSeconds));
+            var totalOpt = TimeSpan.FromSeconds(result.DayBreakdowns.Sum(d => d.OptimizedMakespan.TotalSeconds));
+            sb.AppendLine($"  {new string('-', 90)}");
+            sb.AppendLine($"  {"ИТОГО",-12} {"",7} {"",7} {result.TotalReplenishmentTasks,7} {result.TotalDistributionTasks,7} {result.TotalActions,7} {FormatDurationShort(totalActual),14} {FormatDurationShort(totalOpt),14} {result.ImprovementPercent:F1}%");
+            sb.AppendLine();
+        }
 
         // Разбивка по работникам
         sb.AppendLine("--- РАЗБИВКА ПО РАБОТНИКАМ ---");

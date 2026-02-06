@@ -88,6 +88,10 @@ public class WaveTaskGroup
 
     [JsonPropertyName("actions")]
     public List<WaveTaskAction> Actions { get; set; } = new();
+
+    /// <summary>Ссылка на связанную replenishment-задачу (для distribution)</summary>
+    [JsonPropertyName("prevTaskRef")]
+    public string PrevTaskRef { get; set; } = string.Empty;
 }
 
 /// <summary>
@@ -181,6 +185,12 @@ public class ActionTiming
     public int Qty { get; set; }
     public double DurationSec { get; set; }
     public string WorkerCode { get; set; } = string.Empty;
+    /// <summary>Replenishment / Distribution</summary>
+    public string TaskType { get; set; } = string.Empty;
+    /// <summary>UUID задачи rtWMSProductSelection (для связи repl→dist)</summary>
+    public string TaskGroupRef { get; set; } = string.Empty;
+    /// <summary>Ссылка на replenishment-задачу (для distribution)</summary>
+    public string PrevTaskRef { get; set; } = string.Empty;
 }
 
 /// <summary>
@@ -232,6 +242,29 @@ public class SimulatedAction
 }
 
 // ============================================================================
+// Разбивка по дням
+// ============================================================================
+
+/// <summary>
+/// Разбивка бэктеста по одному календарному дню
+/// </summary>
+public class DayBreakdown
+{
+    public DateTime Date { get; set; }
+    public int Workers { get; set; }
+    public int ForkliftWorkers { get; set; }
+    public int PickerWorkers { get; set; }
+    public int ReplActions { get; set; }
+    public int DistActions { get; set; }
+    public int TotalActions { get; set; }
+    /// <summary>Фактическое активное время (merged intervals) за день</summary>
+    public TimeSpan ActualActiveDuration { get; set; }
+    /// <summary>Оптимизированный makespan за день</summary>
+    public TimeSpan OptimizedMakespan { get; set; }
+    public double ImprovementPercent { get; set; }
+}
+
+// ============================================================================
 // Результат бэктеста
 // ============================================================================
 
@@ -264,6 +297,9 @@ public class BacktestResult
     public double ImprovementPercent { get; set; }
     public TimeSpan ImprovementTime { get; set; }
     public bool OptimizerIsOptimal { get; set; }
+
+    // Разбивка по дням
+    public List<DayBreakdown> DayBreakdowns { get; set; } = new();
 
     // Разбивка по работникам
     public List<WorkerBreakdown> WorkerBreakdowns { get; set; } = new();

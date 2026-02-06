@@ -928,6 +928,7 @@ Function GetWaveTasks(Request)
     |   Task.Assignee.Code AS AssigneeCode,
     |   Task.Assignee.Description AS AssigneeName,
     |   Task.Template.Code AS TemplateCode,
+    |   Task.PrevTask AS PrevTask,
     |   CASE
     |       WHEN Task.PrevTask = UNDEFINED
     |           THEN ""Replenishment""
@@ -1015,6 +1016,13 @@ Function GetWaveTasks(Request)
         TaskGroup.Insert("executionStatus",  StrReplace(String(TasksSelection.ExecutionStatus), " ", ""));
         TaskGroup.Insert("executionDate",    FormatDateISO8601(TasksSelection.ExecutionDate));
         TaskGroup.Insert("actions",          ActionsArray);
+
+        // Ссылка на связанную replenishment-задачу (для distribution)
+        If TasksSelection.TaskType = "Distribution" And ValueIsFilled(TasksSelection.PrevTask) Then
+            TaskGroup.Insert("prevTaskRef", String(TasksSelection.PrevTask.UUID()));
+        Else
+            TaskGroup.Insert("prevTaskRef", "");
+        EndIf;
 
         // Distribute by type
         If TasksSelection.TaskType = "Replenishment" Then
