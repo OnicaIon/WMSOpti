@@ -26,11 +26,13 @@ public static class BacktestReportWriter
         PrintBoxLine(w, $"  Работников:    {result.UniqueWorkers}");
         PrintBoxSep(w);
 
-        var actualStr = FormatDuration(result.ActualDuration);
+        var wallClockStr = FormatDuration(result.ActualWallClockDuration);
+        var activeStr = FormatDuration(result.ActualActiveDuration);
         var optStr = FormatDuration(result.OptimizedDuration);
         var diffStr = FormatDuration(result.ImprovementTime);
 
-        PrintBoxLine(w, $"  ФАКТ:          {actualStr}");
+        PrintBoxLine(w, $"  ФАКТ (от-до):  {wallClockStr}");
+        PrintBoxLine(w, $"  ФАКТ (работа): {activeStr}");
         PrintBoxLine(w, $"  ОПТИМИЗАЦИЯ:   {optStr}");
 
         if (result.ImprovementPercent > 0)
@@ -58,10 +60,11 @@ public static class BacktestReportWriter
         }
 
         PrintBoxSep(w);
-        PrintBoxLine(w, $"  Источники оценки:");
+        PrintBoxLine(w, $"  Источники оценки времени:");
+        PrintBoxLine(w, $"    actual (из 1С):  {result.ActualDurationsUsed}");
         PrintBoxLine(w, $"    route_stats:     {result.RouteStatsUsed}");
         PrintBoxLine(w, $"    picker_product:  {result.PickerStatsUsed}");
-        PrintBoxLine(w, $"    default:         {result.DefaultEstimatesUsed}");
+        PrintBoxLine(w, $"    default (~{result.WaveMeanDurationSec:F0}с): {result.DefaultEstimatesUsed}");
         PrintBoxBottom(w);
         System.Console.WriteLine();
     }
@@ -101,7 +104,8 @@ public static class BacktestReportWriter
         sb.AppendLine("--- РЕЗУЛЬТАТЫ СРАВНЕНИЯ ---");
         sb.AppendLine($"  Фактическое начало:    {result.ActualStartTime:dd.MM.yyyy HH:mm:ss}");
         sb.AppendLine($"  Фактическое окончание: {result.ActualEndTime:dd.MM.yyyy HH:mm:ss}");
-        sb.AppendLine($"  Фактическое время:     {FormatDuration(result.ActualDuration)}");
+        sb.AppendLine($"  Факт (от-до):          {FormatDuration(result.ActualWallClockDuration)} (включая ночи/перерывы)");
+        sb.AppendLine($"  Факт (работа):         {FormatDuration(result.ActualActiveDuration)} (только активное время)");
         sb.AppendLine($"  Оптимизированное:      {FormatDuration(result.OptimizedDuration)}");
         sb.AppendLine($"  Улучшение:             {result.ImprovementPercent:F1}% ({FormatDuration(result.ImprovementTime)})");
         sb.AppendLine($"  Optimizer:             {(result.OptimizerIsOptimal ? "Optimal solution" : "Feasible solution")}");
@@ -121,9 +125,10 @@ public static class BacktestReportWriter
 
         // Источники оценки
         sb.AppendLine("--- ИСТОЧНИКИ ОЦЕНКИ ВРЕМЕНИ ---");
+        sb.AppendLine($"  actual (фактическое из 1С):      {result.ActualDurationsUsed} действий");
         sb.AppendLine($"  route_stats (маршруты из БД):    {result.RouteStatsUsed} действий");
         sb.AppendLine($"  picker_product (пикер+товар):    {result.PickerStatsUsed} действий");
-        sb.AppendLine($"  default (120с по умолчанию):     {result.DefaultEstimatesUsed} действий");
+        sb.AppendLine($"  default (среднее ~{result.WaveMeanDurationSec:F1}с):   {result.DefaultEstimatesUsed} действий");
         sb.AppendLine();
 
         // Детали заданий

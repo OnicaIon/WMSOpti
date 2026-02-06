@@ -54,7 +54,8 @@ public class WaveBacktestService
 
         // 2. Рассчитать фактическое время
         var actualTimeline = CalculateActualTimeline(waveData);
-        _logger.LogInformation("Фактическое время: {Duration}", actualTimeline.Duration);
+        _logger.LogInformation("Фактическое время: {WallClock} (активное: {Active})",
+            actualTimeline.WallClockDuration, actualTimeline.ActiveDuration);
 
         // 3. Загрузить статистику из БД
         var routeStats = await _repository.GetRouteStatisticsAsync(cancellationToken: ct);
@@ -171,10 +172,21 @@ public class WaveBacktestService
         var endTime = allCompleted.Any() ? allCompleted.Max(a => a.Action.CompletedAt!.Value)
             : data.WaveDate;
 
+        // Активное время: merge интервалов [startedAt, completedAt] всех действий
+        // Исключает перерывы, ночь и другие паузы когда никто не работал
+        var activeIntervals = allActions
+            .Where(a => a.Action.StartedAt.HasValue && a.Action.CompletedAt.HasValue)
+            .Select(a => (start: a.Action.StartedAt!.Value, end: a.Action.CompletedAt!.Value))
+            .Where(i => i.end > i.start)
+            .OrderBy(i => i.start)
+            .ToList();
+        var activeDuration = MergeIntervalsAndSum(activeIntervals);
+
         return new ActualTimeline
         {
             StartTime = startTime,
             EndTime = endTime,
+            ActiveDuration = activeDuration,
             TotalActions = allActions.Count,
             WorkerTimelines = workerTimelines
         };
@@ -256,6 +268,12 @@ public class WaveBacktestService
 
                 if (actionMappings.TryGetValue(assignment.Task.Id, out var mapping))
                 {
+                    // Сохраняем фактическую длительность из 1С для честного сравнения
+                    double dur = mapping.Action.DurationSec ?? 0;
+                    if (dur <= 0 && mapping.Action.CompletedAt.HasValue && mapping.Action.StartedAt.HasValue)
+                        dur = (mapping.Action.CompletedAt.Value - mapping.Action.StartedAt.Value).TotalSeconds;
+                    if (dur < 0) dur = 0;
+
                     plan.WorkerAssignments[workerCode].Add(new ActionTiming
                     {
                         FromBin = mapping.Action.StorageBin,
@@ -266,6 +284,7 @@ public class WaveBacktestService
                         ProductName = mapping.Action.ProductName,
                         WeightKg = mapping.Action.WeightKg,
                         Qty = mapping.Action.QtyPlan,
+                        DurationSec = dur,
                         WorkerCode = workerCode
                     });
                 }
@@ -290,6 +309,12 @@ public class WaveBacktestService
                 if (!plan.WorkerAssignments.ContainsKey(workerCode))
                     plan.WorkerAssignments[workerCode] = new List<ActionTiming>();
 
+                // Сохраняем фактическую длительность из 1С для честного сравнения
+                double dur = item.Action.DurationSec ?? 0;
+                if (dur <= 0 && item.Action.CompletedAt.HasValue && item.Action.StartedAt.HasValue)
+                    dur = (item.Action.CompletedAt.Value - item.Action.StartedAt.Value).TotalSeconds;
+                if (dur < 0) dur = 0;
+
                 plan.WorkerAssignments[workerCode].Add(new ActionTiming
                 {
                     FromBin = item.Action.StorageBin,
@@ -300,6 +325,7 @@ public class WaveBacktestService
                     ProductName = item.Action.ProductName,
                     WeightKg = item.Action.WeightKg,
                     Qty = item.Action.QtyPlan,
+                    DurationSec = dur,
                     WorkerCode = workerCode
                 });
                 idx++;
@@ -328,6 +354,18 @@ public class WaveBacktestService
             .GroupBy(p => $"{p.PickerId}:{p.ProductSku}")
             .ToDictionary(g => g.Key, g => g.First());
 
+        // Среднее фактическое время действия из данных волны — для default fallback
+        // вместо фиксированных 120с
+        var allActualDurations = plan.WorkerAssignments
+            .SelectMany(kvp => kvp.Value)
+            .Where(a => a.DurationSec > 0)
+            .Select(a => a.DurationSec)
+            .ToList();
+        var waveMeanDurationSec = allActualDurations.Any()
+            ? allActualDurations.Average()
+            : DefaultRouteDurationSec;
+        timeline.WaveMeanDurationSec = waveMeanDurationSec;
+
         foreach (var (workerCode, actions) in plan.WorkerAssignments)
         {
             var workerTimeline = new SimulatedWorkerTimeline
@@ -341,7 +379,7 @@ public class WaveBacktestService
             foreach (var action in actions)
             {
                 var (estimatedSec, source) = EstimateActionDuration(
-                    action, workerCode, routeLookup, pickerLookup);
+                    action, workerCode, routeLookup, pickerLookup, waveMeanDurationSec);
 
                 workerTimeline.Actions.Add(new SimulatedAction
                 {
@@ -381,7 +419,8 @@ public class WaveBacktestService
         int routeStatsCount,
         int pickerStatsCount)
     {
-        var actualDuration = actual.Duration;
+        // Сравниваем активное время (без перерывов/ночей) с оптимизированным
+        var actualDuration = actual.ActiveDuration;
         var optimizedDuration = simulated.TotalDuration;
         var improvementTime = actualDuration - optimizedDuration;
         var improvementPercent = actualDuration.TotalSeconds > 0
@@ -460,6 +499,7 @@ public class WaveBacktestService
 
         // Подсчёт источников оценки
         var allSimActions = simulated.WorkerTimelines.SelectMany(w => w.Actions).ToList();
+        var actualUsed = allSimActions.Count(a => a.DurationSource == "actual");
         var routeStatsUsed = allSimActions.Count(a => a.DurationSource == "route_stats");
         var pickerStatsUsed = allSimActions.Count(a => a.DurationSource == "picker_product");
         var defaultUsed = allSimActions.Count(a => a.DurationSource == "default");
@@ -475,16 +515,19 @@ public class WaveBacktestService
             UniqueWorkers = actual.WorkerTimelines.Count,
             ActualStartTime = actual.StartTime,
             ActualEndTime = actual.EndTime,
-            ActualDuration = actualDuration,
+            ActualWallClockDuration = actual.WallClockDuration,
+            ActualActiveDuration = actualDuration,
             OptimizedDuration = optimizedDuration,
             ImprovementPercent = improvementPercent,
             ImprovementTime = improvementTime,
             OptimizerIsOptimal = plan.IsOptimal,
             WorkerBreakdowns = workerBreakdowns,
             TaskDetails = taskDetails,
+            ActualDurationsUsed = actualUsed,
             RouteStatsUsed = routeStatsUsed,
             PickerStatsUsed = pickerStatsUsed,
-            DefaultEstimatesUsed = defaultUsed
+            DefaultEstimatesUsed = defaultUsed,
+            WaveMeanDurationSec = simulated.WaveMeanDurationSec
         };
     }
 
@@ -499,9 +542,16 @@ public class WaveBacktestService
         ActionTiming action,
         string workerCode,
         Dictionary<string, RouteStatistics> routeLookup,
-        Dictionary<string, PickerProductStats> pickerLookup)
+        Dictionary<string, PickerProductStats> pickerLookup,
+        double waveMeanDurationSec)
     {
-        // 1. Пробуем picker_product_stats (worker + product) — самая точная оценка
+        // 0. Фактическая длительность из данных волны — самый точный источник
+        if (action.DurationSec > 0)
+        {
+            return (action.DurationSec, "actual");
+        }
+
+        // 1. Пробуем picker_product_stats (worker + product)
         if (!string.IsNullOrEmpty(workerCode) && !string.IsNullOrEmpty(action.ProductCode))
         {
             var pickerKey = $"{workerCode}:{action.ProductCode}";
@@ -521,8 +571,8 @@ public class WaveBacktestService
             }
         }
 
-        // 3. Default
-        return (DefaultRouteDurationSec, "default");
+        // 3. Среднее по волне (вместо фиксированных 120с)
+        return (waveMeanDurationSec, "default");
     }
 
     /// <summary>
@@ -543,6 +593,37 @@ public class WaveBacktestService
         }
 
         return 50.0; // Default 50 meters
+    }
+
+    /// <summary>
+    /// Объединить пересекающиеся интервалы и посчитать суммарную длительность.
+    /// Промежутки где никто не работал (перерывы, ночь) автоматически исключаются.
+    /// </summary>
+    private static TimeSpan MergeIntervalsAndSum(List<(DateTime start, DateTime end)> intervals)
+    {
+        if (!intervals.Any()) return TimeSpan.Zero;
+
+        var merged = new List<(DateTime start, DateTime end)>();
+        var current = intervals[0];
+
+        foreach (var interval in intervals.Skip(1))
+        {
+            if (interval.start <= current.end)
+            {
+                // Пересекаются — расширяем
+                if (interval.end > current.end)
+                    current.end = interval.end;
+            }
+            else
+            {
+                // Разрыв — это перерыв/ночь, сохраняем текущий и начинаем новый
+                merged.Add(current);
+                current = interval;
+            }
+        }
+        merged.Add(current);
+
+        return TimeSpan.FromSeconds(merged.Sum(m => (m.end - m.start).TotalSeconds));
     }
 
     /// <summary>

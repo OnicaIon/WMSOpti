@@ -929,8 +929,7 @@ Function GetWaveTasks(Request)
     |   Task.Assignee.Description AS AssigneeName,
     |   Task.Template.Code AS TemplateCode,
     |   CASE
-    |       WHEN Task.PrevTask IS NULL
-    |           OR Task.PrevTask = VALUE(Document.rtWMSProductSelection.EmptyRef)
+    |       WHEN Task.Template.Code = ""029""
     |           THEN ""Replenishment""
     |       ELSE ""Distribution""
     |   END AS TaskType

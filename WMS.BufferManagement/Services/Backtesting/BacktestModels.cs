@@ -142,7 +142,10 @@ public class ActualTimeline
 {
     public DateTime StartTime { get; set; }
     public DateTime EndTime { get; set; }
-    public TimeSpan Duration => EndTime - StartTime;
+    /// <summary>Полное время от-до (включая ночи, перерывы)</summary>
+    public TimeSpan WallClockDuration => EndTime - StartTime;
+    /// <summary>Активное время (только когда хотя бы 1 работник работал)</summary>
+    public TimeSpan ActiveDuration { get; set; }
     public int TotalActions { get; set; }
     public List<WorkerTimeline> WorkerTimelines { get; set; } = new();
 }
@@ -197,6 +200,7 @@ public class OptimizedPlan
 public class SimulatedTimeline
 {
     public TimeSpan TotalDuration { get; set; }
+    public double WaveMeanDurationSec { get; set; }
     public List<SimulatedWorkerTimeline> WorkerTimelines { get; set; } = new();
 }
 
@@ -250,7 +254,10 @@ public class BacktestResult
     // Факт
     public DateTime ActualStartTime { get; set; }
     public DateTime ActualEndTime { get; set; }
-    public TimeSpan ActualDuration { get; set; }
+    /// <summary>Полное время от-до (включая ночи, перерывы)</summary>
+    public TimeSpan ActualWallClockDuration { get; set; }
+    /// <summary>Активное время (только когда кто-то работал)</summary>
+    public TimeSpan ActualActiveDuration { get; set; }
 
     // Оптимизация
     public TimeSpan OptimizedDuration { get; set; }
@@ -266,9 +273,12 @@ public class BacktestResult
 
     // Метаданные анализа
     public DateTime AnalyzedAt { get; set; } = DateTime.UtcNow;
+    public int ActualDurationsUsed { get; set; }
     public int RouteStatsUsed { get; set; }
     public int PickerStatsUsed { get; set; }
     public int DefaultEstimatesUsed { get; set; }
+    /// <summary>Среднее фактическое время действия (для default fallback)</summary>
+    public double WaveMeanDurationSec { get; set; }
 }
 
 /// <summary>
