@@ -1621,7 +1621,8 @@ public class TimescaleDbRepository : IHistoricalRepository, IAsyncDisposable
             ORDER BY worker_id;";
 
         await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("role", (object?)role ?? DBNull.Value);
+        cmd.Parameters.Add(new NpgsqlParameter("role", NpgsqlTypes.NpgsqlDbType.Varchar)
+            { Value = (object?)role ?? DBNull.Value });
         cmd.Parameters.AddWithValue("min_transitions", minTransitions);
 
         var results = new List<WorkerTransitionStats>();
