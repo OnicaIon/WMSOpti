@@ -114,3 +114,18 @@ public class PickerProductStats
     public DateTime LastTaskAt { get; set; }
     public DateTime UpdatedAt { get; set; }
 }
+
+/// <summary>
+/// Среднее время перехода работника между палетами (из исторических данных).
+/// gap = следующий started_at - текущий completed_at (внутри одного дня).
+/// Исключены обеды/ночь/уход (gap > 10 мин), последние палеты дня.
+/// </summary>
+public class WorkerTransitionStats
+{
+    public string WorkerId { get; set; } = string.Empty;
+    public string WorkerName { get; set; } = string.Empty;
+    public string WorkerRole { get; set; } = string.Empty;
+    public double AvgTransitionSec { get; set; }
+    public double MedianTransitionSec { get; set; }
+    public int TransitionCount { get; set; }
+}

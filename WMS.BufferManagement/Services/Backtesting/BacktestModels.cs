@@ -339,6 +339,16 @@ public class BacktestResult
     public int DaysSaved { get; set; }
     /// <summary>Ёмкость буфера (из конфига)</summary>
     public int BufferCapacity { get; set; }
+
+    // Время перехода между палетами (рассчитано из данных волны)
+    /// <summary>Среднее время перехода пикера между палетами (сек)</summary>
+    public double PickerTransitionSec { get; set; }
+    /// <summary>Среднее время перехода форклифта между палетами (сек)</summary>
+    public double ForkliftTransitionSec { get; set; }
+    /// <summary>Количество переходов пикеров (для статистики)</summary>
+    public int PickerTransitionCount { get; set; }
+    /// <summary>Количество переходов форклифтов (для статистики)</summary>
+    public int ForkliftTransitionCount { get; set; }
 }
 
 /// <summary>

@@ -82,7 +82,8 @@ ImprovementPercent = (ActualActive - OptimizedDuration) / ActualActive × 100%
 
 | Константа | Значение | Описание |
 |-----------|----------|----------|
-| PickerTransitionTimeSec | 0 (было 60) | Пауза между палетами у пикера (временно выключена) |
+| TransitionTimeSec | Из БД (медиана) | Пауза между палетами (per role, из исторических данных) |
+| MaxTransitionGapSec (SQL) | 600 | Макс. разрыв для учёта как переход (не обед/ночь) |
 | DefaultRouteDurationSec | 120 | Fallback если нет статистики (используется редко) |
 | Bin code формат | `01A-01-02-03` | Зона = символы после "01" (например "A") |
 

@@ -22,7 +22,6 @@ public class WaveBacktestService
     private readonly ILogger<WaveBacktestService> _logger;
     private readonly int _bufferCapacity;
 
-    private const double PickerTransitionTimeSec = 0.0;
     private const double DefaultRouteDurationSec = 120.0;
 
     public WaveBacktestService(
@@ -103,13 +102,27 @@ public class WaveBacktestService
         // 3. Загрузить статистику из БД
         var routeStats = await _repository.GetRouteStatisticsAsync(cancellationToken: ct);
         var pickerStats = await _repository.GetPickerProductStatsAsync(cancellationToken: ct);
+        var transitionStats = await _repository.GetWorkerTransitionStatsAsync(cancellationToken: ct);
 
-        _logger.LogInformation("Статистика: {Routes} маршрутов, {Pickers} пикер-товар",
-            routeStats.Count, pickerStats.Count);
+        _logger.LogInformation("Статистика: {Routes} маршрутов, {Pickers} пикер-товар, {Trans} переходов",
+            routeStats.Count, pickerStats.Count, transitionStats.Count);
+
+        // Среднее время перехода по ролям (из исторических данных)
+        var pickerTransitions = transitionStats.Where(t => t.WorkerRole == "Picker").ToList();
+        var forkliftTransitions = transitionStats.Where(t => t.WorkerRole == "Forklift").ToList();
+        var pickerTransitionSec = pickerTransitions.Any()
+            ? pickerTransitions.Average(t => t.MedianTransitionSec) : 0;
+        var forkliftTransitionSec = forkliftTransitions.Any()
+            ? forkliftTransitions.Average(t => t.MedianTransitionSec) : 0;
+
+        _logger.LogInformation(
+            "Время перехода: пикеры={PickerSec:F1}с ({PickerCount} работн.), форклифты={ForkSec:F1}с ({ForkCount} работн.)",
+            pickerTransitionSec, pickerTransitions.Count, forkliftTransitionSec, forkliftTransitions.Count);
 
         // 4. Кросс-дневная оптимизация с буфером
         var (optimizedPlan, simulatedTimeline, dayBreakdowns) =
-            OptimizeCrossDay(waveData, actualTimeline, routeStats, pickerStats);
+            OptimizeCrossDay(waveData, actualTimeline, routeStats, pickerStats,
+                pickerTransitionSec, forkliftTransitionSec);
 
         var optDays = dayBreakdowns.Count(d => d.OptimizedReplGroups + d.OptimizedDistGroups > 0);
         var origDays = dayBreakdowns.Count(d => d.OriginalReplGroups + d.OriginalDistGroups > 0);
@@ -119,6 +132,12 @@ public class WaveBacktestService
         // 5. Собрать результат
         var result = BuildResult(waveData, actualTimeline, simulatedTimeline,
             optimizedPlan, dayBreakdowns);
+
+        // Заполнить поля переходов
+        result.PickerTransitionSec = pickerTransitionSec;
+        result.ForkliftTransitionSec = forkliftTransitionSec;
+        result.PickerTransitionCount = pickerTransitions.Sum(t => t.TransitionCount);
+        result.ForkliftTransitionCount = forkliftTransitions.Sum(t => t.TransitionCount);
 
         return result;
     }
@@ -287,7 +306,9 @@ public class WaveBacktestService
             WaveTasksResponse waveData,
             ActualTimeline actualTimeline,
             List<RouteStatistics> routeStats,
-            List<PickerProductStats> pickerStats)
+            List<PickerProductStats> pickerStats,
+            double pickerTransitionSec,
+            double forkliftTransitionSec)
     {
         var allAnnotated = BuildAnnotatedActions(waveData);
 
@@ -463,7 +484,8 @@ public class WaveBacktestService
                 (replDone, distDone, dayAssignments, dayMakespan) = SimulateDay(
                     replPool, distPool, completedRepl,
                     dayForklifts, dayPickers,
-                    ref bufferLevel, _bufferCapacity);
+                    ref bufferLevel, _bufferCapacity,
+                    forkliftTransitionSec, pickerTransitionSec);
 
                 // Merge assignments
                 foreach (var (wc, actions) in dayAssignments)
@@ -580,11 +602,15 @@ public class WaveBacktestService
             Dictionary<string, double> forkliftCapacity,
             Dictionary<string, double> pickerCapacity,
             ref int bufferLevel,
-            int bufferCapacity)
+            int bufferCapacity,
+            double forkliftTransitionSec,
+            double pickerTransitionSec)
     {
         var assignments = new Dictionary<string, List<ActionTiming>>();
         var forkliftLoad = forkliftCapacity.Keys.ToDictionary(k => k, _ => 0.0);
+        var forkliftTaskCount = forkliftCapacity.Keys.ToDictionary(k => k, _ => 0);
         var pickerFinishTime = pickerCapacity.Keys.ToDictionary(k => k, _ => 0.0);
+        var pickerTaskCount = pickerCapacity.Keys.ToDictionary(k => k, _ => 0);
         var forkliftRemaining = new Dictionary<string, double>(forkliftCapacity);
         var pickerRemaining = new Dictionary<string, double>(pickerCapacity);
 
@@ -605,7 +631,11 @@ public class WaveBacktestService
                 foreach (var rg in replPool)
                 {
                     var fk = forkliftRemaining
-                        .Where(kv => kv.Value >= rg.DurationSec - tolerance)
+                        .Where(kv =>
+                        {
+                            var trans = forkliftTaskCount[kv.Key] > 0 ? forkliftTransitionSec : 0;
+                            return kv.Value >= rg.DurationSec + trans - tolerance;
+                        })
                         .OrderByDescending(kv => kv.Value)
                         .Select(kv => kv.Key)
                         .FirstOrDefault();
@@ -621,8 +651,11 @@ public class WaveBacktestService
                 if (bestRepl != null && bestForklift != null)
                 {
                     replPool.Remove(bestRepl);
-                    forkliftLoad[bestForklift] += bestRepl.DurationSec;
-                    forkliftRemaining[bestForklift] -= bestRepl.DurationSec;
+                    // Время перехода: если форклифт уже работал, добавить transition
+                    var fkTransition = forkliftTaskCount[bestForklift] > 0 ? forkliftTransitionSec : 0;
+                    forkliftLoad[bestForklift] += fkTransition + bestRepl.DurationSec;
+                    forkliftRemaining[bestForklift] -= fkTransition + bestRepl.DurationSec;
+                    forkliftTaskCount[bestForklift]++;
                     completedRepl.Add(bestRepl.TaskGroupRef);
                     bufferLevel++;
                     replDone++;
@@ -647,7 +680,11 @@ public class WaveBacktestService
                 if (readyDist != null)
                 {
                     var bestPicker = pickerRemaining
-                        .Where(kv => kv.Value >= readyDist.DurationSec - tolerance)
+                        .Where(kv =>
+                        {
+                            var trans = pickerTaskCount[kv.Key] > 0 ? pickerTransitionSec : 0;
+                            return kv.Value >= readyDist.DurationSec + trans - tolerance;
+                        })
                         .OrderBy(kv => pickerFinishTime[kv.Key])
                         .Select(kv => kv.Key)
                         .FirstOrDefault();
@@ -655,9 +692,11 @@ public class WaveBacktestService
                     if (bestPicker != null)
                     {
                         distPool.Remove(readyDist);
-                        var pause = pickerFinishTime[bestPicker] > 0 ? PickerTransitionTimeSec : 0;
-                        pickerFinishTime[bestPicker] += pause + readyDist.DurationSec;
-                        pickerRemaining[bestPicker] -= readyDist.DurationSec;
+                        // Время перехода: если пикер уже работал, добавить transition
+                        var pkTransition = pickerTaskCount[bestPicker] > 0 ? pickerTransitionSec : 0;
+                        pickerFinishTime[bestPicker] += pkTransition + readyDist.DurationSec;
+                        pickerRemaining[bestPicker] -= pkTransition + readyDist.DurationSec;
+                        pickerTaskCount[bestPicker]++;
                         bufferLevel--;
                         distDone++;
 

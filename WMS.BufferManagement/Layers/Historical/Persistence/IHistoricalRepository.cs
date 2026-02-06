@@ -176,6 +176,14 @@ public interface IHistoricalRepository
         string? pickerId = null, string? productSku = null, int minLines = 3,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Среднее время перехода между палетами per worker из исторических данных.
+    /// gap = next.started_at - prev.completed_at (в пределах одного дня, gap > 0 и &lt; 10 мин).
+    /// </summary>
+    Task<List<WorkerTransitionStats>> GetWorkerTransitionStatsAsync(
+        string? role = null, int minTransitions = 5,
+        CancellationToken cancellationToken = default);
+
     // === Zones & Cells ===
 
     /// <summary>

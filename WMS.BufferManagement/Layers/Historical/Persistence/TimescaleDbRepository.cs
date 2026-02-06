@@ -1563,6 +1563,90 @@ public class TimescaleDbRepository : IHistoricalRepository, IAsyncDisposable
     }
 
     // =====================================================
+    // WORKER TRANSITION STATS (gap между палетами)
+    // =====================================================
+
+    /// <summary>
+    /// Среднее время перехода между палетами per worker из исторических данных.
+    /// gap = next.started_at - prev.completed_at (в пределах одного дня, gap > 0 и < 10 мин).
+    /// </summary>
+    public async Task<List<WorkerTransitionStats>> GetWorkerTransitionStatsAsync(
+        string? role = null, int minTransitions = 5, CancellationToken cancellationToken = default)
+    {
+        await using var conn = await OpenConnectionAsync(cancellationToken);
+
+        var sql = @"
+            WITH task_gaps AS (
+                SELECT
+                    worker_id,
+                    worker_name,
+                    worker_role,
+                    started_at,
+                    completed_at,
+                    LAG(completed_at) OVER (
+                        PARTITION BY worker_id, DATE(started_at)
+                        ORDER BY started_at
+                    ) AS prev_completed_at
+                FROM tasks
+                WHERE status = 'Completed'
+                  AND started_at IS NOT NULL
+                  AND completed_at IS NOT NULL
+                  AND completed_at > started_at
+                  AND worker_id IS NOT NULL
+                  AND worker_id <> ''
+            ),
+            valid_gaps AS (
+                SELECT
+                    worker_id,
+                    worker_name,
+                    worker_role,
+                    EXTRACT(EPOCH FROM (started_at - prev_completed_at)) AS gap_sec
+                FROM task_gaps
+                WHERE prev_completed_at IS NOT NULL
+                  AND started_at > prev_completed_at
+                  AND EXTRACT(EPOCH FROM (started_at - prev_completed_at)) > 0
+                  AND EXTRACT(EPOCH FROM (started_at - prev_completed_at)) < 600
+            )
+            SELECT
+                worker_id,
+                MAX(worker_name) AS worker_name,
+                MAX(worker_role) AS worker_role,
+                AVG(gap_sec) AS avg_transition_sec,
+                PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY gap_sec) AS median_transition_sec,
+                COUNT(*) AS transition_count
+            FROM valid_gaps
+            WHERE (@role IS NULL OR worker_role = @role)
+            GROUP BY worker_id
+            HAVING COUNT(*) >= @min_transitions
+            ORDER BY worker_id;";
+
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("role", (object?)role ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("min_transitions", minTransitions);
+
+        var results = new List<WorkerTransitionStats>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            results.Add(new WorkerTransitionStats
+            {
+                WorkerId = reader.GetString(0),
+                WorkerName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                WorkerRole = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                AvgTransitionSec = reader.GetDouble(3),
+                MedianTransitionSec = reader.GetDouble(4),
+                TransitionCount = reader.GetInt32(5)
+            });
+        }
+
+        _logger.LogInformation(
+            "Рассчитана статистика переходов: {Count} работников (роль={Role}, мин. переходов={Min})",
+            results.Count, role ?? "все", minTransitions);
+
+        return results;
+    }
+
+    // =====================================================
     // ZONES & CELLS
     // =====================================================
 

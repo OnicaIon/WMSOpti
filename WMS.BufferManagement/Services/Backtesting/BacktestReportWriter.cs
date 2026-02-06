@@ -50,6 +50,13 @@ public static class BacktestReportWriter
         else
             PrintBoxLine(w, $"  ВОЛНА:         {result.OriginalWaveDays} дн. -> {result.OptimizedWaveDays} дн.");
         PrintBoxLine(w, $"  БУФЕР:         {result.BufferCapacity} палет (макс)");
+
+        // Время переходов между палетами (из исторических данных БД)
+        if (result.PickerTransitionSec > 0 || result.ForkliftTransitionSec > 0)
+        {
+            PrintBoxLine(w, $"  ПЕРЕХОДЫ:      пикер {result.PickerTransitionSec:F1}с ({result.PickerTransitionCount} набл.)");
+            PrintBoxLine(w, $"                 форклифт {result.ForkliftTransitionSec:F1}с ({result.ForkliftTransitionCount} набл.)");
+        }
         PrintBoxSep(w);
 
         // Таблица по дням — палеты и буфер
@@ -138,6 +145,11 @@ public static class BacktestReportWriter
         sb.AppendLine($"  Буфер:                 {result.BufferCapacity} палет (макс)");
         sb.AppendLine($"  Волна:                 {result.OriginalWaveDays} дн. факт -> {result.OptimizedWaveDays} дн. опт ({(result.DaysSaved > 0 ? $"-{result.DaysSaved}" : "0")} дн.)");
         sb.AppendLine($"  Палеты (repl/dist):    {result.TotalReplGroups}/{result.TotalDistGroups}");
+        if (result.PickerTransitionSec > 0 || result.ForkliftTransitionSec > 0)
+        {
+            sb.AppendLine($"  Переход (пикер):       {result.PickerTransitionSec:F1}с медиана ({result.PickerTransitionCount} наблюдений из БД)");
+            sb.AppendLine($"  Переход (форклифт):    {result.ForkliftTransitionSec:F1}с медиана ({result.ForkliftTransitionCount} наблюдений из БД)");
+        }
         sb.AppendLine();
 
         // Разбивка по дням — палеты + буфер + время
