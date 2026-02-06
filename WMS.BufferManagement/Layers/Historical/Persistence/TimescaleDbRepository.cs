@@ -1610,7 +1610,7 @@ public class TimescaleDbRepository : IHistoricalRepository, IAsyncDisposable
             SELECT
                 worker_id,
                 MAX(worker_name) AS worker_name,
-                MAX(worker_role) AS worker_role,
+                MODE() WITHIN GROUP (ORDER BY worker_role) AS worker_role,
                 AVG(gap_sec) AS avg_transition_sec,
                 PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY gap_sec) AS median_transition_sec,
                 COUNT(*) AS transition_count
