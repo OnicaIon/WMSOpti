@@ -319,7 +319,7 @@ public class TimescaleDbRepository : IHistoricalRepository, IAsyncDisposable
         try
         {
             await ExecuteNonQueryAsync(conn,
-                $"SELECT create_hypertable('{table}', '{timeColumn}', chunk_time_interval => INTERVAL '{chunkInterval}', if_not_exists => TRUE);",
+                $"SELECT create_hypertable('{table}', '{timeColumn}', chunk_time_interval => INTERVAL '{chunkInterval}', if_not_exists => TRUE, migrate_data => TRUE);",
                 ct);
         }
         catch (Exception ex)
