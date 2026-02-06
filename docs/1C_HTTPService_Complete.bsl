@@ -874,6 +874,172 @@ Function GetPickerTasks(Request)
 EndFunction
 
 // ============================================================================
+// ENDPOINT: GET /wave-tasks?wave=<WaveNumber>
+// Возвращает плановые и выполненные задания волны дистрибьюции
+// ============================================================================
+
+Function GetWaveTasks(Request)
+    If Not CheckAuthentication(Request) Then
+        Return CreateErrorResponse(401, "UNAUTHORIZED", "Invalid API key");
+    EndIf;
+
+    WaveNumber = GetQueryParameter(Request, "wave");
+    If WaveNumber = Undefined Or WaveNumber = "" Then
+        Return CreateErrorResponse(400, "BAD_REQUEST", "Parameter 'wave' is required");
+    EndIf;
+
+    // Find wave document
+    WaveQuery = New Query;
+    WaveQuery.Text =
+    "SELECT
+    |   Wave.Ref AS Ref,
+    |   Wave.Date AS Date,
+    |   Wave.Number AS Number,
+    |   Wave.ExecutionStatus AS ExecutionStatus
+    |FROM
+    |   Document.sgDistributionWave AS Wave
+    |WHERE
+    |   Wave.Number = &WaveNumber";
+    WaveQuery.SetParameter("WaveNumber", WaveNumber);
+
+    WaveResult = WaveQuery.Execute();
+    If WaveResult.IsEmpty() Then
+        Return CreateErrorResponse(404, "NOT_FOUND", "Wave not found: " + WaveNumber);
+    EndIf;
+
+    WaveSelection = WaveResult.Select();
+    WaveSelection.Next();
+
+    WaveRef = WaveSelection.Ref;
+    WaveDate = WaveSelection.Date;
+    WaveStatus = String(WaveSelection.ExecutionStatus);
+
+    // Get tasks via sgExtendedDocumentsStatuses → rtWMSProductSelection
+    TasksQuery = New Query;
+    TasksQuery.Text =
+    "SELECT
+    |   Statuses.Document AS Wave,
+    |   Statuses.Operation AS Operation,
+    |   Task.Ref AS Task,
+    |   Task.Number AS TaskNumber,
+    |   Task.ExecutionStatus AS ExecutionStatus,
+    |   Task.ExecutionDate AS ExecutionDate,
+    |   Task.Assignee.Code AS AssigneeCode,
+    |   Task.Assignee.Description AS AssigneeName,
+    |   Task.ActionTemplate.Code AS TemplateCode,
+    |   CASE
+    |       WHEN Task.PrevTask = VALUE(Document.rtWMSProductSelection.EmptyRef)
+    |           THEN ""Replenishment""
+    |       ELSE ""Distribution""
+    |   END AS TaskType
+    |FROM
+    |   InformationRegister.sgExtendedDocumentsStatuses AS Statuses
+    |       INNER JOIN Document.rtWMSProductSelection AS Task
+    |       ON Statuses.Operation = Task.Operation
+    |WHERE
+    |   Statuses.Document = &WaveRef
+    |   AND Task.Posted
+    |ORDER BY
+    |   Task.Date";
+    TasksQuery.SetParameter("WaveRef", WaveRef);
+
+    TasksResult = TasksQuery.Execute();
+    TasksSelection = TasksResult.Select();
+
+    ReplenishmentArray = New Array;
+    DistributionArray = New Array;
+
+    While TasksSelection.Next() Do
+
+        TaskRef = TasksSelection.Task;
+
+        // Get plan actions and fact (sgTaskAction)
+        ActionsQuery = New Query;
+        ActionsQuery.Text =
+        "SELECT
+        |   PlanAction.StorageBin.Code AS StorageBin,
+        |   PlanAction.AllocationBin.Code AS AllocationBin,
+        |   PlanAction.StorageProduct.Code AS ProductCode,
+        |   PlanAction.StorageProduct.Description AS ProductName,
+        |   PlanAction.StorageProduct.Weight AS ProductWeight,
+        |   PlanAction.Qty AS QtyPlan,
+        |   PlanAction.SortOrder AS SortOrder,
+        |   ISNULL(Fact.Qty, 0) AS QtyFact,
+        |   Fact.CompletedAt AS FactCompletedAt,
+        |   Fact.StartedAt AS FactStartedAt
+        |FROM
+        |   Document.rtWMSProductSelection.PlanActions AS PlanAction
+        |       LEFT JOIN Document.sgTaskAction AS Fact
+        |       ON Fact.TaskBasis = &TaskRef
+        |           AND Fact.AllocationBin = PlanAction.AllocationBin
+        |           AND Fact.StorageProduct = PlanAction.StorageProduct
+        |           AND Fact.Posted
+        |WHERE
+        |   PlanAction.Ref = &TaskRef
+        |ORDER BY
+        |   PlanAction.SortOrder";
+        ActionsQuery.SetParameter("TaskRef", TaskRef);
+
+        ActionsResult = ActionsQuery.Execute();
+        ActionsSelection = ActionsResult.Select();
+
+        ActionsArray = New Array;
+
+        While ActionsSelection.Next() Do
+            Action = New Structure;
+            Action.Insert("storageBin",   String(ActionsSelection.StorageBin));
+            Action.Insert("allocationBin", String(ActionsSelection.AllocationBin));
+            Action.Insert("productCode",   String(ActionsSelection.ProductCode));
+            Action.Insert("productName",   String(ActionsSelection.ProductName));
+            Action.Insert("weightKg",      ActionsSelection.ProductWeight);
+            Action.Insert("qtyPlan",       ActionsSelection.QtyPlan);
+            Action.Insert("qtyFact",       ActionsSelection.QtyFact);
+            Action.Insert("sortOrder",     ActionsSelection.SortOrder);
+            Action.Insert("completedAt",   FormatDateISO8601(ActionsSelection.FactCompletedAt));
+            Action.Insert("startedAt",     FormatDateISO8601(ActionsSelection.FactStartedAt));
+
+            If ValueIsFilled(ActionsSelection.FactCompletedAt) And ValueIsFilled(ActionsSelection.FactStartedAt) Then
+                DurationSec = ActionsSelection.FactCompletedAt - ActionsSelection.FactStartedAt;
+                Action.Insert("durationSec", DurationSec);
+            Else
+                Action.Insert("durationSec", 0);
+            EndIf;
+
+            ActionsArray.Add(Action);
+        EndDo;
+
+        // Build task group
+        TaskGroup = New Structure;
+        TaskGroup.Insert("taskRef",         String(TaskRef.UUID()));
+        TaskGroup.Insert("taskNumber",       TrimAll(TasksSelection.TaskNumber));
+        TaskGroup.Insert("assigneeCode",     String(TasksSelection.AssigneeCode));
+        TaskGroup.Insert("assigneeName",     String(TasksSelection.AssigneeName));
+        TaskGroup.Insert("templateCode",     String(TasksSelection.TemplateCode));
+        TaskGroup.Insert("executionStatus",  StrReplace(String(TasksSelection.ExecutionStatus), " ", ""));
+        TaskGroup.Insert("executionDate",    FormatDateISO8601(TasksSelection.ExecutionDate));
+        TaskGroup.Insert("actions",          ActionsArray);
+
+        // Distribute by type
+        If TasksSelection.TaskType = "Replenishment" Then
+            ReplenishmentArray.Add(TaskGroup);
+        Else
+            DistributionArray.Add(TaskGroup);
+        EndIf;
+
+    EndDo;
+
+    // Build response
+    Result = New Structure;
+    Result.Insert("waveNumber",         TrimAll(WaveNumber));
+    Result.Insert("waveDate",           FormatDateISO8601(WaveDate));
+    Result.Insert("status",             WaveStatus);
+    Result.Insert("replenishmentTasks", ReplenishmentArray);
+    Result.Insert("distributionTasks",  DistributionArray);
+
+    Return CreateResponse(200, Result);
+EndFunction
+
+// ============================================================================
 // HTTP SERVICE ROUTER
 // ============================================================================
 
@@ -925,6 +1091,9 @@ Function ProcessRequest(Request)
 
     ElsIf URLTemplate = "/picker-tasks" And Method = "GET" Then
         Return GetPickerTasks(Request);
+
+    ElsIf URLTemplate = "/wave-tasks" And Method = "GET" Then
+        Return GetWaveTasks(Request);
 
     Else
         Return CreateErrorResponse(404, "NOT_FOUND", "Endpoint not found: " + Method + " " + URLTemplate);

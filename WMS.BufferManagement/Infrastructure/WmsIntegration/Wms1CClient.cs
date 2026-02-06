@@ -330,6 +330,14 @@ public interface IWms1CClient
         DateTime? modifiedAfter = null,
         int? limit = null,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Получить задания волны дистрибьюции по номеру волны
+    /// GET /wave-tasks?wave={waveNumber}
+    /// </summary>
+    Task<Services.Backtesting.WaveTasksResponse?> GetWaveTasksAsync(
+        string waveNumber,
+        CancellationToken ct = default);
 }
 
 /// <summary>
@@ -738,6 +746,14 @@ public class Wms1CClient : IWms1CClient
         }
 
         return await GetAsync<PagedResponse<WmsProductRecord>>(url, ct) ?? new PagedResponse<WmsProductRecord>();
+    }
+
+    public async Task<Services.Backtesting.WaveTasksResponse?> GetWaveTasksAsync(
+        string waveNumber,
+        CancellationToken ct = default)
+    {
+        var url = $"wave-tasks?wave={Uri.EscapeDataString(waveNumber)}";
+        return await GetAsync<Services.Backtesting.WaveTasksResponse>(url, ct);
     }
 
     private string BuildUrl(string endpoint, string? afterId = null, int? limit = null)

@@ -85,6 +85,11 @@ public class MlTrainer
         // Статистика по товарам
         allMetrics.ProductStats = await CalculateProductStatisticsAsync();
 
+        System.Console.WriteLine();
+
+        // Статистика по категориям
+        allMetrics.CategoryStats = await CalculateCategoryStatisticsAsync();
+
         // Сохраняем метрики в JSON
         await SaveMetricsAsync(allMetrics);
     }
@@ -374,6 +379,149 @@ public class MlTrainer
 
     #endregion
 
+    #region Category Statistics
+
+    /// <summary>
+    /// Расчёт статистики по категориям товаров
+    /// </summary>
+    public async Task<CategoryStatsSummary> CalculateCategoryStatisticsAsync()
+    {
+        System.Console.WriteLine("=== СТАТИСТИКА ПО КАТЕГОРИЯМ ===\n");
+
+        var result = new CategoryStatsSummary();
+
+        await using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync();
+
+        // 1. Проверяем наличие категорий в products
+        System.Console.WriteLine("1. Проверка данных о категориях...");
+        await using (var checkCmd = new NpgsqlCommand(@"
+            SELECT
+                COUNT(DISTINCT category_code) as categories,
+                COUNT(*) as products_with_category
+            FROM products
+            WHERE category_code IS NOT NULL AND category_code != ''", conn))
+        {
+            await using var reader = await checkCmd.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
+            {
+                result.TotalCategories = (int)reader.GetInt64(0);
+                result.TotalProductsWithCategory = (int)reader.GetInt64(1);
+            }
+        }
+
+        System.Console.WriteLine($"   Категорий в справочнике: {result.TotalCategories}");
+        System.Console.WriteLine($"   Товаров с категорией: {result.TotalProductsWithCategory}");
+
+        if (result.TotalCategories == 0)
+        {
+            System.Console.WriteLine("\n   ⚠ Категории товаров не заполнены в справочнике products");
+            result.Recommendation = "Категории не заполнены. Анализ по категориям невозможен.";
+            return result;
+        }
+
+        // 2. Статистика по категориям
+        System.Console.WriteLine("\n2. Расчёт статистики по категориям...");
+        await using (var statsCmd = new NpgsqlCommand(@"
+            WITH category_tasks AS (
+                SELECT
+                    p.category_code,
+                    p.category_name,
+                    t.duration_sec,
+                    t.created_at
+                FROM tasks t
+                JOIN products p ON t.product_type = p.sku OR t.product_type = p.code
+                WHERE p.category_code IS NOT NULL
+                  AND t.duration_sec > 0
+                  AND t.duration_sec < 600
+            ),
+            date_range AS (
+                SELECT GREATEST(1, MAX(created_at::date) - MIN(created_at::date) + 1) as days_count
+                FROM category_tasks
+            ),
+            products_per_category AS (
+                SELECT category_code, COUNT(*) as products_count
+                FROM products
+                WHERE category_code IS NOT NULL
+                GROUP BY category_code
+            )
+            SELECT
+                ct.category_code,
+                ct.category_name,
+                ppc.products_count,
+                COUNT(*) as tasks_count,
+                AVG(ct.duration_sec) as avg_time,
+                PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY ct.duration_sec) as median_time,
+                STDDEV(ct.duration_sec) as std_dev,
+                COUNT(*)::decimal / dr.days_count as tasks_per_day
+            FROM category_tasks ct
+            CROSS JOIN date_range dr
+            JOIN products_per_category ppc ON ct.category_code = ppc.category_code
+            GROUP BY ct.category_code, ct.category_name, ppc.products_count, dr.days_count
+            HAVING COUNT(*) >= 10
+            ORDER BY COUNT(*) DESC", conn))
+        {
+            await using var reader = await statsCmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                result.Categories.Add(new CategoryStatRecord
+                {
+                    CategoryCode = reader.GetString(0),
+                    CategoryName = reader.IsDBNull(1) ? reader.GetString(0) : reader.GetString(1),
+                    ProductsCount = (int)reader.GetInt64(2),
+                    TasksCount = (int)reader.GetInt64(3),
+                    AvgTimeSec = reader.IsDBNull(4) ? 0 : (double)reader.GetDecimal(4),
+                    MedianTimeSec = reader.IsDBNull(5) ? 0 : reader.GetDouble(5),
+                    StdDevSec = reader.IsDBNull(6) ? 0 : reader.GetDouble(6),
+                    TasksPerDay = reader.IsDBNull(7) ? 0 : (double)reader.GetDecimal(7)
+                });
+            }
+        }
+
+        if (result.Categories.Count > 0)
+        {
+            System.Console.WriteLine($"   Категорий с данными: {result.Categories.Count}\n");
+
+            System.Console.WriteLine("3. Топ-10 категорий по задачам:\n");
+            System.Console.WriteLine("   ┌──────────────────────────────┬──────────┬──────────┬──────────┬──────────┐");
+            System.Console.WriteLine("   │ Категория                    │ Товаров  │ Задач    │ Avg(сек) │ StdDev   │");
+            System.Console.WriteLine("   ├──────────────────────────────┼──────────┼──────────┼──────────┼──────────┤");
+
+            foreach (var c in result.Categories.Take(10))
+            {
+                var name = c.CategoryName.Length > 28 ? c.CategoryName[..28] : c.CategoryName.PadRight(28);
+                System.Console.WriteLine($"   │ {name} │ {c.ProductsCount,8} │ {c.TasksCount,8} │ {c.AvgTimeSec,8:F1} │ {c.StdDevSec,8:F1} │");
+            }
+            System.Console.WriteLine("   └──────────────────────────────┴──────────┴──────────┴──────────┴──────────┘");
+
+            // Анализ полезности
+            var avgStdDev = result.Categories.Average(c => c.StdDevSec);
+            var categoriesWithLowVariance = result.Categories.Count(c => c.StdDevSec < avgStdDev * 0.7);
+
+            if (categoriesWithLowVariance > result.Categories.Count * 0.3)
+            {
+                result.Recommendation = $"РЕКОМЕНДУЕТСЯ использовать категории. {categoriesWithLowVariance} категорий имеют низкую вариативность времени - они предсказуемы.";
+                System.Console.WriteLine($"\n   ✓ РЕКОМЕНДАЦИЯ: Анализ по категориям ИМЕЕТ СМЫСЛ");
+                System.Console.WriteLine($"     {categoriesWithLowVariance} из {result.Categories.Count} категорий имеют стабильное время");
+            }
+            else
+            {
+                result.Recommendation = "Категории имеют высокую вариативность. Лучше использовать анализ по отдельным товарам.";
+                System.Console.WriteLine($"\n   ⚠ РЕКОМЕНДАЦИЯ: Категории имеют высокую вариативность");
+                System.Console.WriteLine($"     Лучше использовать анализ по отдельным товарам");
+            }
+        }
+        else
+        {
+            System.Console.WriteLine("   Не удалось связать задачи с категориями товаров");
+            result.Recommendation = "Не удалось связать tasks.product_type с products.sku/code";
+        }
+
+        return result;
+    }
+
+    #endregion
+
     #region Data Loading
 
     private async Task<List<PickerTaskData>> LoadPickerDataAsync()
@@ -520,6 +668,7 @@ public class MlTrainer
         public ModelMetrics? PickerModel { get; set; }
         public ModelMetrics? ForkliftModel { get; set; }
         public ProductStatsSummary? ProductStats { get; set; }
+        public CategoryStatsSummary? CategoryStats { get; set; }
     }
 
     public class ProductStatsSummary
@@ -542,6 +691,26 @@ public class MlTrainer
         public double MinQty { get; set; }
         public double MaxQty { get; set; }
         public int TasksCount { get; set; }
+        public double TasksPerDay { get; set; }
+    }
+
+    public class CategoryStatsSummary
+    {
+        public int TotalCategories { get; set; }
+        public int TotalProductsWithCategory { get; set; }
+        public List<CategoryStatRecord> Categories { get; set; } = new();
+        public string Recommendation { get; set; } = "";
+    }
+
+    public class CategoryStatRecord
+    {
+        public string CategoryCode { get; set; } = "";
+        public string CategoryName { get; set; } = "";
+        public int ProductsCount { get; set; }
+        public int TasksCount { get; set; }
+        public double AvgTimeSec { get; set; }
+        public double MedianTimeSec { get; set; }
+        public double StdDevSec { get; set; }
         public double TasksPerDay { get; set; }
     }
 

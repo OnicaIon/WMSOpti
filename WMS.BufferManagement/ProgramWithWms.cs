@@ -11,13 +11,13 @@ using WMS.BufferManagement.Layers.Realtime.BufferControl;
 using WMS.BufferManagement.Layers.Realtime.Dispatcher;
 using WMS.BufferManagement.Layers.Tactical;
 using WMS.BufferManagement.Services;
+using WMS.BufferManagement.Services.Backtesting;
 using SystemConsole = System.Console;
 
 namespace WMS.BufferManagement;
 
 /// <summary>
-/// Точка входа с поддержкой WMS интеграции
-/// Использование: dotnet run -- --wms для режима WMS, иначе симуляция
+/// Точка входа: без параметров → интерактивное меню, с --флагами → CLI-режим
 /// </summary>
 public static class ProgramWithWms
 {
@@ -32,12 +32,26 @@ public static class ProgramWithWms
             return;
         }
 
+        // CLI-режимы (для скриптов/автоматизации — обратная совместимость)
+        if (args.Any(a => a.StartsWith("--")))
+        {
+            await RunCliMode(args);
+            return;
+        }
+
+        // Без параметров → интерактивное меню
+        var host = CreateHostBuilder(args).Build();
+        await Tools.InteractiveMenu.RunAsync(host.Services);
+    }
+
+    private static async Task RunCliMode(string[] args)
+    {
         // Режим расчёта статистики (--calc)
         if (args.Contains("--calc"))
         {
-            SystemConsole.WriteLine("╔══════════════════════════════════════════════════════════════╗");
-            SystemConsole.WriteLine("║  WMS Buffer Management - Statistics Calculator               ║");
-            SystemConsole.WriteLine("╚══════════════════════════════════════════════════════════════╝");
+            SystemConsole.WriteLine("\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557");
+            SystemConsole.WriteLine("\u2551  WMS Buffer Management - Statistics Calculator               \u2551");
+            SystemConsole.WriteLine("\u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d");
             SystemConsole.WriteLine();
 
             var host = CreateHostBuilder(args).Build();
@@ -59,14 +73,26 @@ public static class ProgramWithWms
             return;
         }
 
-        SystemConsole.WriteLine("╔══════════════════════════════════════════════════════════════╗");
-        SystemConsole.WriteLine("║  WMS Buffer Management System v1.0                           ║");
-        SystemConsole.WriteLine("║  Mode: WMS Integration                                       ║");
-        SystemConsole.WriteLine("╚══════════════════════════════════════════════════════════════╝");
+        // Режим фонового сервиса (--service)
+        if (args.Contains("--service"))
+        {
+            await RunServiceMode(args);
+            return;
+        }
+
+        // Неизвестный флаг → справка
+        PrintHelp();
+    }
+
+    private static async Task RunServiceMode(string[] args)
+    {
+        SystemConsole.WriteLine("\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557");
+        SystemConsole.WriteLine("\u2551  WMS Buffer Management System v1.0                           \u2551");
+        SystemConsole.WriteLine("\u2551  Mode: WMS Integration (Background Service)                  \u2551");
+        SystemConsole.WriteLine("\u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d");
         SystemConsole.WriteLine();
 
         var hostFull = CreateHostBuilder(args).Build();
-
         var cts = new CancellationTokenSource();
 
         SystemConsole.CancelKeyPress += (s, e) =>
@@ -88,42 +114,33 @@ public static class ProgramWithWms
 
     private static void PrintHelp()
     {
-        SystemConsole.WriteLine("╔══════════════════════════════════════════════════════════════╗");
-        SystemConsole.WriteLine("║  WMS Buffer Management System - Command Line Interface       ║");
-        SystemConsole.WriteLine("╚══════════════════════════════════════════════════════════════╝");
+        SystemConsole.WriteLine("\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557");
+        SystemConsole.WriteLine("\u2551  WMS Buffer Management System                                \u2551");
+        SystemConsole.WriteLine("\u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d");
         SystemConsole.WriteLine();
-        SystemConsole.WriteLine("Использование: dotnet run -- [команда]");
+        SystemConsole.WriteLine("\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: dotnet run [-- \u043a\u043e\u043c\u0430\u043d\u0434\u0430]");
         SystemConsole.WriteLine();
-        SystemConsole.WriteLine("Команды:");
-        SystemConsole.WriteLine("  (без параметров)     Запуск полного сервиса (sync + management)");
+        SystemConsole.WriteLine("\u041a\u043e\u043c\u0430\u043d\u0434\u044b:");
+        SystemConsole.WriteLine("  (\u0431\u0435\u0437 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432)     \u0418\u043d\u0442\u0435\u0440\u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0435 \u043c\u0435\u043d\u044e (sync, backtest, stats, ML)");
         SystemConsole.WriteLine();
-        SystemConsole.WriteLine("  СИНХРОНИЗАЦИЯ:");
-        SystemConsole.WriteLine("  --sync-tasks         Синхронизация задач из WMS (инкрементально)");
-        SystemConsole.WriteLine("  --sync-zones         Синхронизация зон");
-        SystemConsole.WriteLine("  --sync-cells         Синхронизация ячеек");
-        SystemConsole.WriteLine("  --sync-products      Синхронизация продуктов");
-        SystemConsole.WriteLine("  --sync-all           Синхронизация всего (tasks + zones + cells + products)");
+        SystemConsole.WriteLine("  \u0421\u0418\u041d\u0425\u0420\u041e\u041d\u0418\u0417\u0410\u0426\u0418\u042f:");
+        SystemConsole.WriteLine("  --sync-tasks         \u0421\u0438\u043d\u0445\u0440\u043e\u043d\u0438\u0437\u0430\u0446\u0438\u044f \u0437\u0430\u0434\u0430\u0447 \u0438\u0437 WMS");
+        SystemConsole.WriteLine("  --sync-zones         \u0421\u0438\u043d\u0445\u0440\u043e\u043d\u0438\u0437\u0430\u0446\u0438\u044f \u0437\u043e\u043d");
+        SystemConsole.WriteLine("  --sync-cells         \u0421\u0438\u043d\u0445\u0440\u043e\u043d\u0438\u0437\u0430\u0446\u0438\u044f \u044f\u0447\u0435\u0435\u043a");
+        SystemConsole.WriteLine("  --sync-products      \u0421\u0438\u043d\u0445\u0440\u043e\u043d\u0438\u0437\u0430\u0446\u0438\u044f \u043f\u0440\u043e\u0434\u0443\u043a\u0442\u043e\u0432");
+        SystemConsole.WriteLine("  --sync-all           \u0421\u0438\u043d\u0445\u0440\u043e\u043d\u0438\u0437\u0430\u0446\u0438\u044f \u0432\u0441\u0435\u0433\u043e");
         SystemConsole.WriteLine();
-        SystemConsole.WriteLine("  ОЧИСТКА:");
-        SystemConsole.WriteLine("  --truncate-tasks     Очистить таблицу задач перед синхронизацией");
-        SystemConsole.WriteLine();
-        SystemConsole.WriteLine("  СТАТИСТИКА:");
-        SystemConsole.WriteLine("  --calc               Пересчёт статистики (workers, routes, picker-product)");
-        SystemConsole.WriteLine("  --calc-workers       Пересчёт статистики работников");
-        SystemConsole.WriteLine("  --calc-routes        Пересчёт статистики маршрутов");
-        SystemConsole.WriteLine("  --calc-picker-product Пересчёт статистики пикер-товар");
+        SystemConsole.WriteLine("  \u0421\u0422\u0410\u0422\u0418\u0421\u0422\u0418\u041a\u0410:");
+        SystemConsole.WriteLine("  --calc               \u041f\u0435\u0440\u0435\u0441\u0447\u0451\u0442 \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0438 (workers, routes, picker-product)");
         SystemConsole.WriteLine();
         SystemConsole.WriteLine("  ML:");
-        SystemConsole.WriteLine("  --train-ml           Обучение ML моделей (picker + forklift)");
+        SystemConsole.WriteLine("  --train-ml           \u041e\u0431\u0443\u0447\u0435\u043d\u0438\u0435 ML \u043c\u043e\u0434\u0435\u043b\u0435\u0439");
         SystemConsole.WriteLine();
-        SystemConsole.WriteLine("  СПРАВКА:");
-        SystemConsole.WriteLine("  --help, -h           Показать эту справку");
+        SystemConsole.WriteLine("  \u0421\u0415\u0420\u0412\u0418\u0421:");
+        SystemConsole.WriteLine("  --service            \u0417\u0430\u043f\u0443\u0441\u043a \u0444\u043e\u043d\u043e\u0432\u043e\u0433\u043e \u0441\u0435\u0440\u0432\u0438\u0441\u0430 (sync + management)");
         SystemConsole.WriteLine();
-        SystemConsole.WriteLine("Примеры:");
-        SystemConsole.WriteLine("  dotnet run -- --sync-tasks              # Загрузить новые задачи");
-        SystemConsole.WriteLine("  dotnet run -- --truncate-tasks --sync-tasks  # Очистить и загрузить все");
-        SystemConsole.WriteLine("  dotnet run -- --calc                    # Пересчитать статистику");
-        SystemConsole.WriteLine("  dotnet run -- --train-ml                # Обучить ML модели");
+        SystemConsole.WriteLine("  \u0421\u041f\u0420\u0410\u0412\u041a\u0410:");
+        SystemConsole.WriteLine("  --help, -h           \u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u044d\u0442\u0443 \u0441\u043f\u0440\u0430\u0432\u043a\u0443");
     }
 
     private static IHostBuilder CreateHostBuilder(string[] args)
@@ -181,6 +198,9 @@ public static class ProgramWithWms
 
                 // Historical слой
                 services.AddSingleton<PickerSpeedPredictor>();
+
+                // Backtesting
+                services.AddSingleton<WaveBacktestService>();
 
                 // WMS интеграция (всегда включена)
                 services.AddWms1CIntegration(configuration);

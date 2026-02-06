@@ -1,0 +1,569 @@
+using Microsoft.Extensions.Logging;
+using WMS.BufferManagement.Domain.Entities;
+using WMS.BufferManagement.Infrastructure.Configuration;
+using WMS.BufferManagement.Infrastructure.WmsIntegration;
+using WMS.BufferManagement.Layers.Historical.Persistence;
+using WMS.BufferManagement.Layers.Historical.Persistence.Models;
+using WMS.BufferManagement.Layers.Tactical;
+
+namespace WMS.BufferManagement.Services.Backtesting;
+
+/// <summary>
+/// Сервис бэктестирования волн дистрибьюции.
+/// Сравнивает фактическое выполнение волны с оптимизированным вариантом.
+/// READ-ONLY: не модифицирует данные в БД.
+/// </summary>
+public class WaveBacktestService
+{
+    private readonly IWms1CClient _wmsClient;
+    private readonly IHistoricalRepository _repository;
+    private readonly PalletAssignmentOptimizer _optimizer;
+    private readonly ILogger<WaveBacktestService> _logger;
+
+    // Значение по умолчанию, если нет статистики маршрута (секунды)
+    private const double DefaultRouteDurationSec = 120.0;
+    // Время погрузки/разгрузки (секунды)
+    private const double LoadUnloadTimeSec = 30.0;
+
+    public WaveBacktestService(
+        IWms1CClient wmsClient,
+        IHistoricalRepository repository,
+        PalletAssignmentOptimizer optimizer,
+        ILogger<WaveBacktestService> logger)
+    {
+        _wmsClient = wmsClient;
+        _repository = repository;
+        _optimizer = optimizer;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Запустить полный бэктест волны
+    /// </summary>
+    public async Task<BacktestResult> RunBacktestAsync(string waveNumber, CancellationToken ct = default)
+    {
+        _logger.LogInformation("Запуск бэктеста волны {WaveNumber}", waveNumber);
+
+        // 1. Получить данные волны из 1С
+        var waveData = await FetchWaveDataAsync(waveNumber, ct);
+        if (waveData == null)
+            throw new InvalidOperationException($"Волна {waveNumber} не найдена в 1С");
+
+        _logger.LogInformation("Получено: {Repl} replenishment, {Dist} distribution задач",
+            waveData.ReplenishmentTasks.Count, waveData.DistributionTasks.Count);
+
+        // 2. Рассчитать фактическое время
+        var actualTimeline = CalculateActualTimeline(waveData);
+        _logger.LogInformation("Фактическое время: {Duration}", actualTimeline.Duration);
+
+        // 3. Загрузить статистику из БД
+        var routeStats = await _repository.GetRouteStatisticsAsync(cancellationToken: ct);
+        var pickerStats = await _repository.GetPickerProductStatsAsync(cancellationToken: ct);
+
+        _logger.LogInformation("Статистика: {Routes} маршрутов, {Pickers} пикер-товар",
+            routeStats.Count, pickerStats.Count);
+
+        // 4. Оптимизировать назначение заданий
+        var optimizedPlan = OptimizeTasks(waveData, routeStats);
+        _logger.LogInformation("Оптимизация: optimal={IsOptimal}", optimizedPlan.IsOptimal);
+
+        // 5. Симулировать оптимизированное выполнение
+        var simulatedTimeline = SimulateOptimized(optimizedPlan, routeStats, pickerStats);
+        _logger.LogInformation("Симулированное время: {Duration}", simulatedTimeline.TotalDuration);
+
+        // 6. Собрать результат
+        var result = BuildResult(waveData, actualTimeline, simulatedTimeline, optimizedPlan, routeStats.Count, pickerStats.Count);
+
+        return result;
+    }
+
+    /// <summary>
+    /// Получить данные волны из 1С
+    /// </summary>
+    public async Task<WaveTasksResponse?> FetchWaveDataAsync(string waveNumber, CancellationToken ct)
+    {
+        try
+        {
+            return await _wmsClient.GetWaveTasksAsync(waveNumber, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Ошибка получения данных волны {WaveNumber} из 1С", waveNumber);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Рассчитать фактическое время выполнения волны
+    /// </summary>
+    public ActualTimeline CalculateActualTimeline(WaveTasksResponse data)
+    {
+        var allGroups = data.ReplenishmentTasks.Concat(data.DistributionTasks).ToList();
+        var allActions = allGroups.SelectMany(g => g.Actions.Select(a => new { Group = g, Action = a })).ToList();
+
+        if (!allActions.Any())
+            return new ActualTimeline { StartTime = data.WaveDate, EndTime = data.WaveDate };
+
+        // Определяем время начала и окончания
+        var completedActions = allActions.Where(a => a.Action.CompletedAt.HasValue).ToList();
+
+        DateTime startTime;
+        DateTime endTime;
+
+        if (completedActions.Any())
+        {
+            // Время начала = самый ранний completedAt минус duration, или executionDate группы
+            var earliestCompletion = completedActions.Min(a => a.Action.CompletedAt!.Value);
+            var latestCompletion = completedActions.Max(a => a.Action.CompletedAt!.Value);
+
+            // Если есть startedAt, используем его
+            var startedActions = allActions.Where(a => a.Action.StartedAt.HasValue).ToList();
+            if (startedActions.Any())
+            {
+                startTime = startedActions.Min(a => a.Action.StartedAt!.Value);
+            }
+            else
+            {
+                // Берём самое раннее executionDate из групп с executionDate
+                var groupsWithDate = allGroups.Where(g => g.ExecutionDate.HasValue).ToList();
+                startTime = groupsWithDate.Any()
+                    ? groupsWithDate.Min(g => g.ExecutionDate!.Value)
+                    : earliestCompletion.AddMinutes(-30); // fallback
+            }
+
+            endTime = latestCompletion;
+        }
+        else
+        {
+            startTime = data.WaveDate;
+            endTime = data.WaveDate;
+        }
+
+        // Группируем по работникам
+        var workerTimelines = allGroups
+            .GroupBy(g => g.AssigneeCode)
+            .Select(group =>
+            {
+                var firstGroup = group.First();
+                var actions = group.SelectMany(g => g.Actions).ToList();
+                var completed = actions.Where(a => a.CompletedAt.HasValue).ToList();
+
+                var workerStart = completed.Any()
+                    ? (completed.Where(a => a.StartedAt.HasValue).Select(a => a.StartedAt!.Value).DefaultIfEmpty(completed.Min(a => a.CompletedAt!.Value)).Min())
+                    : startTime;
+                var workerEnd = completed.Any()
+                    ? completed.Max(a => a.CompletedAt!.Value)
+                    : endTime;
+
+                return new WorkerTimeline
+                {
+                    WorkerCode = firstGroup.AssigneeCode,
+                    WorkerName = firstGroup.AssigneeName,
+                    Role = firstGroup.TemplateCode == "029" ? "Forklift" : firstGroup.TemplateCode == "031" ? "Picker" : "Unknown",
+                    StartTime = workerStart,
+                    EndTime = workerEnd,
+                    TaskCount = actions.Count,
+                    Actions = actions.Select(a => new ActionTiming
+                    {
+                        FromBin = a.StorageBin,
+                        ToBin = a.AllocationBin,
+                        FromZone = ExtractZone(a.StorageBin),
+                        ToZone = ExtractZone(a.AllocationBin),
+                        ProductCode = a.ProductCode,
+                        ProductName = a.ProductName,
+                        WeightKg = a.WeightKg,
+                        Qty = a.QtyFact > 0 ? a.QtyFact : a.QtyPlan,
+                        DurationSec = a.DurationSec ?? (a.CompletedAt.HasValue && a.StartedAt.HasValue
+                            ? (a.CompletedAt.Value - a.StartedAt.Value).TotalSeconds
+                            : 0),
+                        WorkerCode = firstGroup.AssigneeCode
+                    }).ToList()
+                };
+            })
+            .ToList();
+
+        return new ActualTimeline
+        {
+            StartTime = startTime,
+            EndTime = endTime,
+            TotalActions = allActions.Count,
+            WorkerTimelines = workerTimelines
+        };
+    }
+
+    /// <summary>
+    /// Оптимизировать назначение заданий через CP-SAT solver
+    /// </summary>
+    public OptimizedPlan OptimizeTasks(WaveTasksResponse data, List<RouteStatistics> routeStats)
+    {
+        var allGroups = data.ReplenishmentTasks.Concat(data.DistributionTasks).ToList();
+        var allActions = allGroups.SelectMany(g => g.Actions.Select(a => new { Group = g, Action = a })).ToList();
+
+        if (!allActions.Any())
+            return new OptimizedPlan();
+
+        // Уникальные работники (виртуальные карщики)
+        var workerCodes = allGroups.Select(g => g.AssigneeCode).Distinct().ToList();
+
+        // Создаём domain entities для оптимизатора
+        var deliveryTasks = new List<DeliveryTask>();
+        var actionMappings = new Dictionary<string, (WaveTaskGroup Group, WaveTaskAction Action)>();
+
+        foreach (var item in allActions)
+        {
+            var taskId = $"{item.Group.TaskNumber}_{item.Action.SortOrder}";
+            var product = new Product(
+                item.Action.ProductCode,
+                item.Action.ProductName,
+                (double)item.Action.WeightKg);
+
+            var pallet = new Pallet
+            {
+                Id = taskId,
+                Product = product,
+                Quantity = item.Action.QtyPlan > 0 ? item.Action.QtyPlan : 1,
+                StorageDistanceMeters = EstimateDistance(item.Action.StorageBin, item.Action.AllocationBin, routeStats)
+            };
+
+            var task = new DeliveryTask
+            {
+                Id = taskId,
+                Pallet = pallet,
+                Status = DeliveryTaskStatus.Pending
+            };
+
+            deliveryTasks.Add(task);
+            actionMappings[taskId] = (item.Group, item.Action);
+        }
+
+        // Создаём виртуальных карщиков
+        var forklifts = workerCodes.Select(code => new Forklift
+        {
+            Id = code,
+            Name = allGroups.First(g => g.AssigneeCode == code).AssigneeName,
+            State = Domain.Entities.ForkliftState.Idle,
+            SpeedMetersPerSecond = 2.0,
+            LoadUnloadTimeSeconds = LoadUnloadTimeSec
+        }).ToList();
+
+        // Запускаем оптимизатор
+        var result = _optimizer.Optimize(deliveryTasks, forklifts);
+
+        // Конвертируем назначения в план
+        var plan = new OptimizedPlan
+        {
+            IsOptimal = result.IsOptimal,
+            SolverObjective = result.ObjectiveValue,
+            SolverTime = result.SolverTime
+        };
+
+        if (result.IsFeasible)
+        {
+            foreach (var assignment in result.Assignments)
+            {
+                var workerCode = assignment.Forklift.Id;
+                if (!plan.WorkerAssignments.ContainsKey(workerCode))
+                    plan.WorkerAssignments[workerCode] = new List<ActionTiming>();
+
+                if (actionMappings.TryGetValue(assignment.Task.Id, out var mapping))
+                {
+                    plan.WorkerAssignments[workerCode].Add(new ActionTiming
+                    {
+                        FromBin = mapping.Action.StorageBin,
+                        ToBin = mapping.Action.AllocationBin,
+                        FromZone = ExtractZone(mapping.Action.StorageBin),
+                        ToZone = ExtractZone(mapping.Action.AllocationBin),
+                        ProductCode = mapping.Action.ProductCode,
+                        ProductName = mapping.Action.ProductName,
+                        WeightKg = mapping.Action.WeightKg,
+                        Qty = mapping.Action.QtyPlan,
+                        WorkerCode = workerCode
+                    });
+                }
+            }
+
+            // Сортируем задания внутри каждого работника по весу (heavy-on-bottom)
+            foreach (var kvp in plan.WorkerAssignments)
+            {
+                plan.WorkerAssignments[kvp.Key] = kvp.Value
+                    .OrderByDescending(a => a.WeightKg)
+                    .ToList();
+            }
+        }
+        else
+        {
+            // Fallback: распределяем round-robin по работникам, сортируя по весу
+            var sorted = allActions.OrderByDescending(a => a.Action.WeightKg).ToList();
+            int idx = 0;
+            foreach (var item in sorted)
+            {
+                var workerCode = workerCodes[idx % workerCodes.Count];
+                if (!plan.WorkerAssignments.ContainsKey(workerCode))
+                    plan.WorkerAssignments[workerCode] = new List<ActionTiming>();
+
+                plan.WorkerAssignments[workerCode].Add(new ActionTiming
+                {
+                    FromBin = item.Action.StorageBin,
+                    ToBin = item.Action.AllocationBin,
+                    FromZone = ExtractZone(item.Action.StorageBin),
+                    ToZone = ExtractZone(item.Action.AllocationBin),
+                    ProductCode = item.Action.ProductCode,
+                    ProductName = item.Action.ProductName,
+                    WeightKg = item.Action.WeightKg,
+                    Qty = item.Action.QtyPlan,
+                    WorkerCode = workerCode
+                });
+                idx++;
+            }
+        }
+
+        return plan;
+    }
+
+    /// <summary>
+    /// Симулировать оптимизированное выполнение
+    /// </summary>
+    public SimulatedTimeline SimulateOptimized(
+        OptimizedPlan plan,
+        List<RouteStatistics> routeStats,
+        List<PickerProductStats> pickerStats)
+    {
+        var timeline = new SimulatedTimeline();
+
+        // Строим lookup для быстрого поиска
+        var routeLookup = routeStats
+            .GroupBy(r => $"{r.FromZone}→{r.ToZone}")
+            .ToDictionary(g => g.Key, g => g.First());
+
+        var pickerLookup = pickerStats
+            .GroupBy(p => $"{p.PickerId}:{p.ProductSku}")
+            .ToDictionary(g => g.Key, g => g.First());
+
+        foreach (var (workerCode, actions) in plan.WorkerAssignments)
+        {
+            var workerTimeline = new SimulatedWorkerTimeline
+            {
+                WorkerCode = workerCode,
+                TaskCount = actions.Count
+            };
+
+            double totalWorkerSec = 0;
+
+            foreach (var action in actions)
+            {
+                var (estimatedSec, source) = EstimateActionDuration(
+                    action, workerCode, routeLookup, pickerLookup);
+
+                workerTimeline.Actions.Add(new SimulatedAction
+                {
+                    FromBin = action.FromBin,
+                    ToBin = action.ToBin,
+                    FromZone = action.FromZone,
+                    ToZone = action.ToZone,
+                    ProductCode = action.ProductCode,
+                    WeightKg = action.WeightKg,
+                    EstimatedDurationSec = estimatedSec,
+                    DurationSource = source
+                });
+
+                totalWorkerSec += estimatedSec;
+            }
+
+            workerTimeline.Duration = TimeSpan.FromSeconds(totalWorkerSec);
+            timeline.WorkerTimelines.Add(workerTimeline);
+        }
+
+        // Общее время = max длительности по работникам (параллельная работа)
+        timeline.TotalDuration = timeline.WorkerTimelines.Any()
+            ? timeline.WorkerTimelines.Max(w => w.Duration)
+            : TimeSpan.Zero;
+
+        return timeline;
+    }
+
+    /// <summary>
+    /// Собрать итоговый результат бэктеста
+    /// </summary>
+    public BacktestResult BuildResult(
+        WaveTasksResponse data,
+        ActualTimeline actual,
+        SimulatedTimeline simulated,
+        OptimizedPlan plan,
+        int routeStatsCount,
+        int pickerStatsCount)
+    {
+        var actualDuration = actual.Duration;
+        var optimizedDuration = simulated.TotalDuration;
+        var improvementTime = actualDuration - optimizedDuration;
+        var improvementPercent = actualDuration.TotalSeconds > 0
+            ? (improvementTime.TotalSeconds / actualDuration.TotalSeconds) * 100
+            : 0;
+
+        // Собираем разбивку по работникам
+        var workerBreakdowns = new List<WorkerBreakdown>();
+        foreach (var actualWorker in actual.WorkerTimelines)
+        {
+            var simWorker = simulated.WorkerTimelines
+                .FirstOrDefault(w => w.WorkerCode == actualWorker.WorkerCode);
+
+            var optDuration = simWorker?.Duration ?? actualWorker.Duration;
+            var optTasks = simWorker?.TaskCount ?? actualWorker.TaskCount;
+            var workerImprovement = actualWorker.Duration.TotalSeconds > 0
+                ? ((actualWorker.Duration - optDuration).TotalSeconds / actualWorker.Duration.TotalSeconds) * 100
+                : 0;
+
+            workerBreakdowns.Add(new WorkerBreakdown
+            {
+                WorkerCode = actualWorker.WorkerCode,
+                WorkerName = actualWorker.WorkerName,
+                Role = actualWorker.Role,
+                ActualTasks = actualWorker.TaskCount,
+                OptimizedTasks = optTasks,
+                ActualDuration = actualWorker.Duration,
+                OptimizedDuration = optDuration,
+                ImprovementPercent = workerImprovement
+            });
+        }
+
+        // Собираем детали заданий
+        var taskDetails = new List<TaskDetail>();
+        var allGroups = data.ReplenishmentTasks.Concat(data.DistributionTasks).ToList();
+
+        foreach (var group in allGroups)
+        {
+            var taskType = data.ReplenishmentTasks.Contains(group) ? "Replenishment" : "Distribution";
+
+            foreach (var action in group.Actions)
+            {
+                // Ищем оптимизированное время для этого действия
+                var simAction = simulated.WorkerTimelines
+                    .SelectMany(w => w.Actions)
+                    .FirstOrDefault(a => a.FromBin == action.StorageBin &&
+                                         a.ToBin == action.AllocationBin &&
+                                         a.ProductCode == action.ProductCode);
+
+                // Ищем, кому было переназначено
+                var optimizedWorker = plan.WorkerAssignments
+                    .FirstOrDefault(kvp => kvp.Value.Any(a =>
+                        a.FromBin == action.StorageBin &&
+                        a.ToBin == action.AllocationBin &&
+                        a.ProductCode == action.ProductCode));
+
+                taskDetails.Add(new TaskDetail
+                {
+                    TaskNumber = group.TaskNumber,
+                    WorkerCode = group.AssigneeCode,
+                    TaskType = taskType,
+                    FromBin = action.StorageBin,
+                    ToBin = action.AllocationBin,
+                    FromZone = ExtractZone(action.StorageBin),
+                    ToZone = ExtractZone(action.AllocationBin),
+                    ProductCode = action.ProductCode,
+                    WeightKg = action.WeightKg,
+                    Qty = action.QtyFact > 0 ? action.QtyFact : action.QtyPlan,
+                    ActualDurationSec = action.DurationSec,
+                    OptimizedDurationSec = simAction?.EstimatedDurationSec ?? DefaultRouteDurationSec,
+                    DurationSource = simAction?.DurationSource ?? "default",
+                    OptimizedWorkerCode = optimizedWorker.Key
+                });
+            }
+        }
+
+        // Подсчёт источников оценки
+        var allSimActions = simulated.WorkerTimelines.SelectMany(w => w.Actions).ToList();
+        var routeStatsUsed = allSimActions.Count(a => a.DurationSource == "route_stats");
+        var pickerStatsUsed = allSimActions.Count(a => a.DurationSource == "picker_product");
+        var defaultUsed = allSimActions.Count(a => a.DurationSource == "default");
+
+        return new BacktestResult
+        {
+            WaveNumber = data.WaveNumber,
+            WaveDate = data.WaveDate,
+            WaveStatus = data.Status,
+            TotalReplenishmentTasks = data.ReplenishmentTasks.Sum(g => g.Actions.Count),
+            TotalDistributionTasks = data.DistributionTasks.Sum(g => g.Actions.Count),
+            TotalActions = taskDetails.Count,
+            UniqueWorkers = actual.WorkerTimelines.Count,
+            ActualStartTime = actual.StartTime,
+            ActualEndTime = actual.EndTime,
+            ActualDuration = actualDuration,
+            OptimizedDuration = optimizedDuration,
+            ImprovementPercent = improvementPercent,
+            ImprovementTime = improvementTime,
+            OptimizerIsOptimal = plan.IsOptimal,
+            WorkerBreakdowns = workerBreakdowns,
+            TaskDetails = taskDetails,
+            RouteStatsUsed = routeStatsUsed,
+            PickerStatsUsed = pickerStatsUsed,
+            DefaultEstimatesUsed = defaultUsed
+        };
+    }
+
+    // ============================================================================
+    // Вспомогательные методы
+    // ============================================================================
+
+    /// <summary>
+    /// Оценить длительность одного действия на основе статистики
+    /// </summary>
+    private (double durationSec, string source) EstimateActionDuration(
+        ActionTiming action,
+        string workerCode,
+        Dictionary<string, RouteStatistics> routeLookup,
+        Dictionary<string, PickerProductStats> pickerLookup)
+    {
+        // 1. Пробуем route_stats (from_zone → to_zone)
+        var routeKey = $"{action.FromZone}→{action.ToZone}";
+        if (routeLookup.TryGetValue(routeKey, out var route) && route.NormalizedTrips >= 3)
+        {
+            return ((double)route.AvgDurationSec, "route_stats");
+        }
+
+        // 2. Пробуем picker_product_stats (worker + product)
+        var pickerKey = $"{workerCode}:{action.ProductCode}";
+        if (pickerLookup.TryGetValue(pickerKey, out var picker) && picker.AvgDurationSec.HasValue)
+        {
+            return ((double)picker.AvgDurationSec.Value, "picker_product");
+        }
+
+        // 3. Default
+        return (DefaultRouteDurationSec, "default");
+    }
+
+    /// <summary>
+    /// Оценить расстояние маршрута на основе статистики (для PalletAssignmentOptimizer)
+    /// </summary>
+    private double EstimateDistance(string fromBin, string toBin, List<RouteStatistics> routeStats)
+    {
+        var fromZone = ExtractZone(fromBin);
+        var toZone = ExtractZone(toBin);
+
+        var route = routeStats.FirstOrDefault(r =>
+            r.FromZone == fromZone && r.ToZone == toZone && r.NormalizedTrips >= 3);
+
+        if (route != null)
+        {
+            // Конвертируем avg_duration_sec в приблизительное расстояние (скорость 2 м/с)
+            return (double)route.AvgDurationSec * 2.0 / 4.0; // round-trip, 2 load/unload cycles
+        }
+
+        return 50.0; // Default 50 meters
+    }
+
+    /// <summary>
+    /// Извлечь код зоны из кода ячейки (например "01A-01-02-03" → "A")
+    /// </summary>
+    private static string ExtractZone(string binCode)
+    {
+        if (string.IsNullOrEmpty(binCode))
+            return "?";
+
+        var parts = binCode.Split('-');
+        if (parts.Length > 0 && parts[0].Length >= 3 && parts[0].StartsWith("01"))
+        {
+            return parts[0].Substring(2);
+        }
+
+        return parts.Length > 0 ? parts[0] : binCode;
+    }
+}
