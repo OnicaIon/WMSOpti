@@ -390,6 +390,8 @@ public class WaveBacktestService
         var simWorkers = new List<SimulatedWorkerTimeline>();
 
         // === Группируем действия по задачам (task groups) ===
+        // Длительность группы = wall-clock span (не sum DurationSec),
+        // т.к. действия в 1С могут иметь перекрывающиеся timestamps
         var replTaskGroups = dayActions
             .Where(a => a.TaskType == "Replenishment")
             .GroupBy(a => a.TaskGroupRef)
@@ -397,7 +399,7 @@ public class WaveBacktestService
             {
                 TaskGroupRef = g.Key,
                 Actions = g.ToList(),
-                TotalDurationSec = g.Sum(a => a.DurationSec),
+                TotalDurationSec = ComputeGroupSpanSec(g.ToList()),
                 OriginalWorker = g.First().OriginalWorkerCode,
                 OriginalWorkerName = g.First().OriginalWorkerName
             })
@@ -412,16 +414,17 @@ public class WaveBacktestService
                 TaskGroupRef = g.Key,
                 PrevTaskRef = g.First().PrevTaskRef,
                 Actions = g.ToList(),
-                TotalDurationSec = g.Sum(a => a.DurationSec),
+                TotalDurationSec = ComputeGroupSpanSec(g.ToList()),
                 OriginalWorker = g.First().OriginalWorkerCode,
                 OriginalWorkerName = g.First().OriginalWorkerName
             })
             .ToList();
 
-        // === Capacity работников: сумма фактических длительностей за день ===
+        // === Capacity работников: merged intervals за день (не sum DurationSec) ===
+        // Учитывает перекрытие timestamps — даёт реальное wall-clock время работника
         var workerCapacities = dayActions
             .GroupBy(a => a.OriginalWorkerCode)
-            .ToDictionary(g => g.Key, g => g.Sum(a => a.DurationSec));
+            .ToDictionary(g => g.Key, g => ComputeWorkerDayCapacitySec(g.ToList()));
 
         // Форклифт-работники (только те, у кого есть repl-действия в этот день)
         var forkliftWorkerCodes = replTaskGroups
@@ -813,6 +816,45 @@ public class WaveBacktestService
         merged.Add(current);
 
         return TimeSpan.FromSeconds(merged.Sum(m => (m.end - m.start).TotalSeconds));
+    }
+
+    /// <summary>
+    /// Wall-clock длительность группы действий (span от первого StartedAt до последнего CompletedAt).
+    /// Корректно при перекрывающихся timestamps в 1С.
+    /// </summary>
+    private static double ComputeGroupSpanSec(List<AnnotatedAction> actions)
+    {
+        var withTimestamps = actions
+            .Where(a => a.Action.StartedAt.HasValue && a.Action.CompletedAt.HasValue)
+            .ToList();
+
+        if (!withTimestamps.Any())
+            return actions.Sum(a => a.DurationSec); // fallback
+
+        var start = withTimestamps.Min(a => a.Action.StartedAt!.Value);
+        var end = withTimestamps.Max(a => a.Action.CompletedAt!.Value);
+        var span = (end - start).TotalSeconds;
+
+        return span > 0 ? span : actions.Sum(a => a.DurationSec);
+    }
+
+    /// <summary>
+    /// Merged interval duration работника за день.
+    /// Корректно при перекрывающихся timestamps — даёт реальное wall-clock время.
+    /// </summary>
+    private static double ComputeWorkerDayCapacitySec(List<AnnotatedAction> workerActions)
+    {
+        var intervals = workerActions
+            .Where(a => a.Action.StartedAt.HasValue && a.Action.CompletedAt.HasValue)
+            .Select(a => (start: a.Action.StartedAt!.Value, end: a.Action.CompletedAt!.Value))
+            .Where(i => i.end > i.start)
+            .OrderBy(i => i.start)
+            .ToList();
+
+        if (!intervals.Any())
+            return workerActions.Sum(a => a.DurationSec); // fallback
+
+        return MergeIntervalsAndSum(intervals).TotalSeconds;
     }
 
     /// <summary>
