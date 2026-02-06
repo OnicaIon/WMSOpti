@@ -1,6 +1,38 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace WMS.BufferManagement.Services.Backtesting;
+
+/// <summary>
+/// Конвертер для DateTime? — пустая строка → null
+/// </summary>
+public class NullableDateTimeConverter : JsonConverter<DateTime?>
+{
+    public override DateTime? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.Null)
+            return null;
+        if (reader.TokenType == JsonTokenType.String)
+        {
+            var str = reader.GetString();
+            if (string.IsNullOrWhiteSpace(str))
+                return null;
+            if (DateTime.TryParse(str, System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.RoundtripKind, out var dt))
+                return dt;
+            return null;
+        }
+        return reader.GetDateTime();
+    }
+
+    public override void Write(Utf8JsonWriter writer, DateTime? value, JsonSerializerOptions options)
+    {
+        if (value.HasValue)
+            writer.WriteStringValue(value.Value.ToString("O"));
+        else
+            writer.WriteNullValue();
+    }
+}
 
 // ============================================================================
 // Ответ от 1С — данные волны
@@ -51,6 +83,7 @@ public class WaveTaskGroup
     public string ExecutionStatus { get; set; } = string.Empty;
 
     [JsonPropertyName("executionDate")]
+    [JsonConverter(typeof(NullableDateTimeConverter))]
     public DateTime? ExecutionDate { get; set; }
 
     [JsonPropertyName("actions")]
@@ -84,9 +117,11 @@ public class WaveTaskAction
     public int QtyFact { get; set; }
 
     [JsonPropertyName("completedAt")]
+    [JsonConverter(typeof(NullableDateTimeConverter))]
     public DateTime? CompletedAt { get; set; }
 
     [JsonPropertyName("startedAt")]
+    [JsonConverter(typeof(NullableDateTimeConverter))]
     public DateTime? StartedAt { get; set; }
 
     [JsonPropertyName("durationSec")]
