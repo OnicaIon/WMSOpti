@@ -172,6 +172,10 @@ public static class ProgramWithWms
                 services.Configure<BufferManagementSettings>(configuration.GetSection("BufferManagement"));
                 services.Configure<AggregationSettings>(configuration.GetSection("Aggregation"));
 
+                // Не убивать хост при падении одного фонового сервиса
+                services.Configure<HostOptions>(opts =>
+                    opts.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
+
                 // Инфраструктура
                 services.AddSingleton<IEventBus, InMemoryEventBus>();
                 services.AddSingleton<MetricsStore>();

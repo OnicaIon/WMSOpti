@@ -72,7 +72,18 @@ public class AggregationService : BackgroundService
         _logger.LogInformation("Aggregation service starting...");
 
         // Первичный расчёт при старте
-        await CalculateAggregatesAsync(stoppingToken);
+        try
+        {
+            await CalculateAggregatesAsync(stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Initial aggregate calculation failed (DB may be unavailable), will retry on next cycle");
+        }
 
         while (!stoppingToken.IsCancellationRequested)
         {

@@ -139,8 +139,8 @@ public class WmsDataSyncService : BackgroundService
         // Ждём доступности WMS
         await WaitForWmsAsync(stoppingToken);
 
-        // Инициализируем схему БД
-        await _repository.InitializeSchemaAsync(stoppingToken);
+        // Ждём доступности БД и инициализируем схему
+        await WaitForDatabaseAsync(stoppingToken);
 
         // ===== ОДНОКРАТНАЯ СИНХРОНИЗАЦИЯ =====
         _logger.LogInformation("Starting one-time sync...");
@@ -209,6 +209,30 @@ public class WmsDataSyncService : BackgroundService
             }
 
             await Task.Delay(5000, ct);
+        }
+    }
+
+    private async Task WaitForDatabaseAsync(CancellationToken ct)
+    {
+        _logger.LogInformation("Waiting for database to become available...");
+
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await _repository.InitializeSchemaAsync(ct);
+                _logger.LogInformation("Database is available, schema initialized");
+                return;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning("Database not available, retrying in 10s... ({Message})", ex.Message);
+                await Task.Delay(10_000, ct);
+            }
         }
     }
 
