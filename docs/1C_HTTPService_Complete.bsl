@@ -999,7 +999,7 @@ Function GetWaveTasks(Request)
             Action.Insert("startedAt",     FormatDateISO8601(ActionsSelection.FactStartedAt));
 
             If ValueIsFilled(ActionsSelection.FactCompletedAt) And ValueIsFilled(ActionsSelection.FactStartedAt) Then
-                DurationSec = ActionsSelection.FactCompletedAt - ActionsSelection.FactStartedAt;
+                DurationSec = Number(ActionsSelection.FactCompletedAt - ActionsSelection.FactStartedAt);
                 Action.Insert("durationSec", DurationSec);
             Else
                 Action.Insert("durationSec", 0);
