@@ -104,66 +104,24 @@ public class WaveBacktestService
         if (!allActions.Any())
             return new ActualTimeline { StartTime = data.WaveDate, EndTime = data.WaveDate };
 
-        // Определяем время начала и окончания
-        var completedActions = allActions.Where(a => a.Action.CompletedAt.HasValue).ToList();
-
-        DateTime startTime;
-        DateTime endTime;
-
-        if (completedActions.Any())
-        {
-            // Время начала = самый ранний completedAt минус duration, или executionDate группы
-            var earliestCompletion = completedActions.Min(a => a.Action.CompletedAt!.Value);
-            var latestCompletion = completedActions.Max(a => a.Action.CompletedAt!.Value);
-
-            // Если есть startedAt, используем его
-            var startedActions = allActions.Where(a => a.Action.StartedAt.HasValue).ToList();
-            if (startedActions.Any())
-            {
-                startTime = startedActions.Min(a => a.Action.StartedAt!.Value);
-            }
-            else
-            {
-                // Берём самое раннее executionDate из групп с executionDate
-                var groupsWithDate = allGroups.Where(g => g.ExecutionDate.HasValue).ToList();
-                startTime = groupsWithDate.Any()
-                    ? groupsWithDate.Min(g => g.ExecutionDate!.Value)
-                    : earliestCompletion.AddMinutes(-30); // fallback
-            }
-
-            endTime = latestCompletion;
-        }
-        else
-        {
-            startTime = data.WaveDate;
-            endTime = data.WaveDate;
-        }
-
         // Группируем по работникам
         var workerTimelines = allGroups
+            .Where(g => !string.IsNullOrEmpty(g.AssigneeCode))
             .GroupBy(g => g.AssigneeCode)
             .Select(group =>
             {
                 var firstGroup = group.First();
                 var actions = group.SelectMany(g => g.Actions).ToList();
-                var completed = actions.Where(a => a.CompletedAt.HasValue).ToList();
 
-                var workerStart = completed.Any()
-                    ? (completed.Where(a => a.StartedAt.HasValue).Select(a => a.StartedAt!.Value).DefaultIfEmpty(completed.Min(a => a.CompletedAt!.Value)).Min())
-                    : startTime;
-                var workerEnd = completed.Any()
-                    ? completed.Max(a => a.CompletedAt!.Value)
-                    : endTime;
-
-                return new WorkerTimeline
+                // Рассчитываем длительность каждого действия
+                var actionTimings = actions.Select(a =>
                 {
-                    WorkerCode = firstGroup.AssigneeCode,
-                    WorkerName = firstGroup.AssigneeName,
-                    Role = firstGroup.TemplateCode == "029" ? "Forklift" : firstGroup.TemplateCode == "031" ? "Picker" : "Unknown",
-                    StartTime = workerStart,
-                    EndTime = workerEnd,
-                    TaskCount = actions.Count,
-                    Actions = actions.Select(a => new ActionTiming
+                    double dur = a.DurationSec ?? 0;
+                    if (dur <= 0 && a.CompletedAt.HasValue && a.StartedAt.HasValue)
+                        dur = (a.CompletedAt.Value - a.StartedAt.Value).TotalSeconds;
+                    if (dur < 0) dur = 0;
+
+                    return new ActionTiming
                     {
                         FromBin = a.StorageBin,
                         ToBin = a.AllocationBin,
@@ -173,14 +131,45 @@ public class WaveBacktestService
                         ProductName = a.ProductName,
                         WeightKg = a.WeightKg,
                         Qty = a.QtyFact > 0 ? a.QtyFact : a.QtyPlan,
-                        DurationSec = a.DurationSec ?? (a.CompletedAt.HasValue && a.StartedAt.HasValue
-                            ? (a.CompletedAt.Value - a.StartedAt.Value).TotalSeconds
-                            : 0),
+                        DurationSec = dur,
                         WorkerCode = firstGroup.AssigneeCode
-                    }).ToList()
+                    };
+                }).ToList();
+
+                // Фактическое время работника = сумма длительностей его действий
+                var totalWorkerSec = actionTimings.Sum(a => a.DurationSec);
+
+                // Определяем start/end для хронологии
+                var completed = actions.Where(a => a.CompletedAt.HasValue).ToList();
+                var started = actions.Where(a => a.StartedAt.HasValue).ToList();
+                var workerStart = started.Any() ? started.Min(a => a.StartedAt!.Value)
+                    : completed.Any() ? completed.Min(a => a.CompletedAt!.Value)
+                    : data.WaveDate;
+                var workerEnd = completed.Any() ? completed.Max(a => a.CompletedAt!.Value)
+                    : data.WaveDate;
+
+                return new WorkerTimeline
+                {
+                    WorkerCode = firstGroup.AssigneeCode,
+                    WorkerName = firstGroup.AssigneeName,
+                    Role = firstGroup.TemplateCode == "029" ? "Forklift" : firstGroup.TemplateCode == "031" ? "Picker" : "Unknown",
+                    StartTime = workerStart,
+                    EndTime = workerEnd,
+                    TaskCount = actions.Count,
+                    Actions = actionTimings
                 };
             })
             .ToList();
+
+        // Общее время волны: от самого раннего startedAt до самого позднего completedAt
+        var allCompleted = allActions.Where(a => a.Action.CompletedAt.HasValue).ToList();
+        var allStarted = allActions.Where(a => a.Action.StartedAt.HasValue).ToList();
+
+        var startTime = allStarted.Any() ? allStarted.Min(a => a.Action.StartedAt!.Value)
+            : allCompleted.Any() ? allCompleted.Min(a => a.Action.CompletedAt!.Value)
+            : data.WaveDate;
+        var endTime = allCompleted.Any() ? allCompleted.Max(a => a.Action.CompletedAt!.Value)
+            : data.WaveDate;
 
         return new ActualTimeline
         {
@@ -512,18 +501,24 @@ public class WaveBacktestService
         Dictionary<string, RouteStatistics> routeLookup,
         Dictionary<string, PickerProductStats> pickerLookup)
     {
-        // 1. Пробуем route_stats (from_zone → to_zone)
-        var routeKey = $"{action.FromZone}→{action.ToZone}";
-        if (routeLookup.TryGetValue(routeKey, out var route) && route.NormalizedTrips >= 3)
+        // 1. Пробуем picker_product_stats (worker + product) — самая точная оценка
+        if (!string.IsNullOrEmpty(workerCode) && !string.IsNullOrEmpty(action.ProductCode))
         {
-            return ((double)route.AvgDurationSec, "route_stats");
+            var pickerKey = $"{workerCode}:{action.ProductCode}";
+            if (pickerLookup.TryGetValue(pickerKey, out var picker) && picker.AvgDurationSec.HasValue)
+            {
+                return ((double)picker.AvgDurationSec.Value, "picker_product");
+            }
         }
 
-        // 2. Пробуем picker_product_stats (worker + product)
-        var pickerKey = $"{workerCode}:{action.ProductCode}";
-        if (pickerLookup.TryGetValue(pickerKey, out var picker) && picker.AvgDurationSec.HasValue)
+        // 2. Пробуем route_stats (from_zone → to_zone), только если обе зоны известны
+        if (action.FromZone != "?" && action.ToZone != "?")
         {
-            return ((double)picker.AvgDurationSec.Value, "picker_product");
+            var routeKey = $"{action.FromZone}→{action.ToZone}";
+            if (routeLookup.TryGetValue(routeKey, out var route) && route.NormalizedTrips >= 3)
+            {
+                return ((double)route.AvgDurationSec, "route_stats");
+            }
         }
 
         // 3. Default

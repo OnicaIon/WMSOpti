@@ -157,7 +157,8 @@ public class WorkerTimeline
     public string Role { get; set; } = string.Empty;
     public DateTime StartTime { get; set; }
     public DateTime EndTime { get; set; }
-    public TimeSpan Duration => EndTime - StartTime;
+    /// <summary>Сумма длительностей всех действий работника</summary>
+    public TimeSpan Duration => TimeSpan.FromSeconds(Actions.Sum(a => a.DurationSec));
     public int TaskCount { get; set; }
     public List<ActionTiming> Actions { get; set; } = new();
 }
