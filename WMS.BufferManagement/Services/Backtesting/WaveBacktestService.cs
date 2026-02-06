@@ -392,24 +392,32 @@ public class WaveBacktestService
             return tgi;
         }).ToList();
 
-        // === Worker-day capacity ===
-        var workerDayData = allAnnotated
+        // === Worker-day capacity (по TaskType, не TemplateCode) ===
+        var forkliftDayData = allAnnotated
+            .Where(a => a.TaskType == "Replenishment")
             .GroupBy(a => (a.OriginalWorkerCode, a.Day))
-            .Select(g =>
+            .Select(g => new
             {
-                var workerType = g.First().TemplateCode == "029" ? "Forklift"
-                    : g.First().TemplateCode == "031" ? "Picker" : "Unknown";
-                return new
-                {
-                    WorkerCode = g.Key.OriginalWorkerCode,
-                    WorkerName = g.First().OriginalWorkerName,
-                    WorkerType = workerType,
-                    Day = g.Key.Day,
-                    CapacitySec = ComputeWorkerDayCapacitySec(g.ToList())
-                };
+                WorkerCode = g.Key.OriginalWorkerCode,
+                WorkerName = g.First().OriginalWorkerName,
+                Day = g.Key.Day,
+                CapacitySec = ComputeWorkerDayCapacitySec(g.ToList())
             }).ToList();
 
-        var allDays = workerDayData.Select(w => w.Day).Distinct().OrderBy(d => d).ToList();
+        var pickerDayData = allAnnotated
+            .Where(a => a.TaskType == "Distribution")
+            .GroupBy(a => (a.OriginalWorkerCode, a.Day))
+            .Select(g => new
+            {
+                WorkerCode = g.Key.OriginalWorkerCode,
+                WorkerName = g.First().OriginalWorkerName,
+                Day = g.Key.Day,
+                CapacitySec = ComputeWorkerDayCapacitySec(g.ToList())
+            }).ToList();
+
+        var allDays = forkliftDayData.Select(w => w.Day)
+            .Concat(pickerDayData.Select(w => w.Day))
+            .Distinct().OrderBy(d => d).ToList();
 
         // Фактические подсчёты по дням (для сравнения)
         var originalDayReplGroups = allAnnotated
@@ -439,11 +447,11 @@ public class WaveBacktestService
         {
             var bufferStart = bufferLevel;
 
-            var dayForklifts = workerDayData
-                .Where(w => w.Day == day && w.WorkerType == "Forklift")
+            var dayForklifts = forkliftDayData
+                .Where(w => w.Day == day)
                 .ToDictionary(w => w.WorkerCode, w => w.CapacitySec);
-            var dayPickers = workerDayData
-                .Where(w => w.Day == day && w.WorkerType == "Picker")
+            var dayPickers = pickerDayData
+                .Where(w => w.Day == day)
                 .ToDictionary(w => w.WorkerCode, w => w.CapacitySec);
 
             int replDone = 0, distDone = 0;
