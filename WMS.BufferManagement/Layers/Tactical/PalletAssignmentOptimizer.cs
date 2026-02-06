@@ -93,7 +93,7 @@ public class PalletAssignmentOptimizer : IOptimizer
 
         // Решаем
         var solver = new CpSolver();
-        solver.StringParameters = $"max_time_in_seconds:{_config.MaxSolverTimeMs / 1000.0}";
+        solver.StringParameters = $"max_time_in_seconds:{(_config.MaxSolverTimeMs / 1000.0).ToString(System.Globalization.CultureInfo.InvariantCulture)}";
 
         var status = solver.Solve(model);
         var solverTime = TimeSpan.FromMilliseconds(_config.MaxSolverTimeMs);
