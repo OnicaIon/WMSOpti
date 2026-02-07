@@ -209,9 +209,6 @@ namespace WMS.BacktestViewer
             gantt.ChartMappings.ProgressFieldName = "Progress";
 
             // Настройки вида
-            gantt.OptionsView.ShowBaseline = false;
-
-            // Раскрывать все узлы
             gantt.OptionsBehavior.Editable = false;
 
             return gantt;
