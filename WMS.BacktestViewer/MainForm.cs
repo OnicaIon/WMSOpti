@@ -191,18 +191,6 @@ namespace WMS.BacktestViewer
             // Настройки вида
             gantt.OptionsBehavior.Editable = false;
 
-            // Tooltip с деталями при наведении
-            gantt.ToolTipController = new DevExpress.Utils.ToolTipController();
-            gantt.NodeCellStyle += (sender, e) =>
-            {
-                if (e.Node != null)
-                {
-                    var tooltip = e.Node.GetValue("Tooltip")?.ToString();
-                    if (!string.IsNullOrEmpty(tooltip))
-                        e.Node.SetValue("_tt", tooltip);
-                }
-            };
-
             return gantt;
         }
 
