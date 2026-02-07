@@ -316,12 +316,16 @@ public class WaveBacktestService
                 var workerEnd = completed.Any() ? completed.Max(a => a.CompletedAt!.Value)
                     : data.WaveDate;
 
+                // Роль по TaskType (большинство задач), а не по TemplateCode
+                var replCount = actionTimings.Count(a => a.TaskType == "Replenishment");
+                var distCount = actionTimings.Count(a => a.TaskType == "Distribution");
+                var role = replCount >= distCount ? "Forklift" : "Picker";
+
                 return new WorkerTimeline
                 {
                     WorkerCode = firstGroup.AssigneeCode,
                     WorkerName = firstGroup.AssigneeName,
-                    Role = firstGroup.TemplateCode == "029" ? "Forklift"
-                        : firstGroup.TemplateCode == "031" ? "Picker" : "Unknown",
+                    Role = role,
                     StartTime = workerStart,
                     EndTime = workerEnd,
                     TaskCount = actions.Count,

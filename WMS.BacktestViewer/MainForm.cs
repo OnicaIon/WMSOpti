@@ -261,7 +261,7 @@ namespace WMS.BacktestViewer
                     dt.Rows.Add(
                         workerId,
                         roleId,
-                        first.WorkerName ?? first.WorkerCode,
+                        !string.IsNullOrWhiteSpace(first.WorkerName) ? first.WorkerName : first.WorkerCode,
                         "",
                         $"{totalWeightKg:F0}",
                         FormatDuration(totalDur),
