@@ -630,12 +630,9 @@ public class WaveBacktestService
 
                 foreach (var rg in replPool)
                 {
+                    // Capacity уже включает паузы (merged intervals), не вычитаем transition
                     var fk = forkliftRemaining
-                        .Where(kv =>
-                        {
-                            var trans = forkliftTaskCount[kv.Key] > 0 ? forkliftTransitionSec : 0;
-                            return kv.Value >= rg.DurationSec + trans - tolerance;
-                        })
+                        .Where(kv => kv.Value >= rg.DurationSec - tolerance)
                         .OrderByDescending(kv => kv.Value)
                         .Select(kv => kv.Key)
                         .FirstOrDefault();
@@ -651,10 +648,10 @@ public class WaveBacktestService
                 if (bestRepl != null && bestForklift != null)
                 {
                     replPool.Remove(bestRepl);
-                    // Время перехода: если форклифт уже работал, добавить transition
+                    // Transition → только finish time (capacity уже включает паузы)
                     var fkTransition = forkliftTaskCount[bestForklift] > 0 ? forkliftTransitionSec : 0;
                     forkliftLoad[bestForklift] += fkTransition + bestRepl.DurationSec;
-                    forkliftRemaining[bestForklift] -= fkTransition + bestRepl.DurationSec;
+                    forkliftRemaining[bestForklift] -= bestRepl.DurationSec;
                     forkliftTaskCount[bestForklift]++;
                     completedRepl.Add(bestRepl.TaskGroupRef);
                     bufferLevel++;
@@ -679,12 +676,9 @@ public class WaveBacktestService
 
                 if (readyDist != null)
                 {
+                    // Capacity уже включает паузы (merged intervals), не вычитаем transition
                     var bestPicker = pickerRemaining
-                        .Where(kv =>
-                        {
-                            var trans = pickerTaskCount[kv.Key] > 0 ? pickerTransitionSec : 0;
-                            return kv.Value >= readyDist.DurationSec + trans - tolerance;
-                        })
+                        .Where(kv => kv.Value >= readyDist.DurationSec - tolerance)
                         .OrderBy(kv => pickerFinishTime[kv.Key])
                         .Select(kv => kv.Key)
                         .FirstOrDefault();
@@ -692,10 +686,10 @@ public class WaveBacktestService
                     if (bestPicker != null)
                     {
                         distPool.Remove(readyDist);
-                        // Время перехода: если пикер уже работал, добавить transition
+                        // Transition → только finish time (capacity уже включает паузы)
                         var pkTransition = pickerTaskCount[bestPicker] > 0 ? pickerTransitionSec : 0;
                         pickerFinishTime[bestPicker] += pkTransition + readyDist.DurationSec;
-                        pickerRemaining[bestPicker] -= pkTransition + readyDist.DurationSec;
+                        pickerRemaining[bestPicker] -= readyDist.DurationSec;
                         pickerTaskCount[bestPicker]++;
                         bufferLevel--;
                         distDone++;
