@@ -374,6 +374,7 @@ public class TaskDetail
 {
     public string TaskNumber { get; set; } = string.Empty;
     public string TaskRef { get; set; } = string.Empty;
+    public string PrevTaskRef { get; set; } = string.Empty;
     public string WorkerCode { get; set; } = string.Empty;
     public string WorkerName { get; set; } = string.Empty;
     public string TaskType { get; set; } = string.Empty; // Replenishment / Distribution
@@ -390,4 +391,11 @@ public class TaskDetail
     // Оптимизация
     public double OptimizedDurationSec { get; set; }
     public string? OptimizedWorkerCode { get; set; }
+
+    // Связанная задача (для dist: кто принёс (repl); для repl: кто забрал (dist))
+    public string? LinkedWorkerCode { get; set; }
+    public string? LinkedWorkerName { get; set; }
+    public double? LinkedActualDurationSec { get; set; }
+    public string? LinkedOptWorkerCode { get; set; }
+    public double? LinkedOptDurationSec { get; set; }
 }

@@ -850,6 +850,7 @@ public class WaveBacktestService
             {
                 TaskNumber = group.TaskNumber,
                 TaskRef = group.TaskRef,
+                PrevTaskRef = group.PrevTaskRef,
                 WorkerCode = group.AssigneeCode,
                 WorkerName = group.AssigneeName,
                 TaskType = taskType,
@@ -865,6 +866,40 @@ public class WaveBacktestService
                 OptimizedWorkerCode = optWorkerByRef.GetValueOrDefault(group.TaskRef)
             });
         }
+
+        // Связать repl↔dist через PrevTaskRef
+        var detailByRef = taskDetails
+            .Where(d => !string.IsNullOrEmpty(d.TaskRef))
+            .ToDictionary(d => d.TaskRef);
+
+        foreach (var td in taskDetails)
+        {
+            if (td.TaskType == "Distribution" && !string.IsNullOrEmpty(td.PrevTaskRef))
+            {
+                // dist → repl: кто принёс эту палету
+                if (detailByRef.TryGetValue(td.PrevTaskRef, out var repl))
+                {
+                    td.LinkedWorkerCode = repl.WorkerCode;
+                    td.LinkedWorkerName = repl.WorkerName;
+                    td.LinkedActualDurationSec = repl.ActualDurationSec;
+                    td.LinkedOptWorkerCode = repl.OptimizedWorkerCode;
+                    td.LinkedOptDurationSec = repl.OptimizedDurationSec;
+
+                    // repl → dist: кто забрал палету
+                    repl.LinkedWorkerCode = td.WorkerCode;
+                    repl.LinkedWorkerName = td.WorkerName;
+                    repl.LinkedActualDurationSec = td.ActualDurationSec;
+                    repl.LinkedOptWorkerCode = td.OptimizedWorkerCode;
+                    repl.LinkedOptDurationSec = td.OptimizedDurationSec;
+                }
+            }
+        }
+
+        // Сортировка по времени начала
+        taskDetails = taskDetails
+            .OrderBy(d => d.StartedAt ?? DateTime.MaxValue)
+            .ThenBy(d => d.TaskType)
+            .ToList();
 
         // Подсчёт источников оценки
         var allSimActions = simulated.WorkerTimelines.SelectMany(w => w.Actions).ToList();

@@ -199,23 +199,65 @@ public static class BacktestReportWriter
         sb.AppendLine($"  default (среднее ~{result.WaveMeanDurationSec:F1}с):   {result.DefaultEstimatesUsed} действий");
         sb.AppendLine();
 
-        // Детали палет (task groups)
-        sb.AppendLine("--- ДЕТАЛИ ПАЛЕТ ---");
-        sb.AppendLine($"  {"#",-4} {"Тип",-6} {"Работник",-10} {"→Опт",-10} {"Маршрут",-6} {"Дейст",5} {"Вес,кг",8} {"Кол-во",6} {"Начало",18} {"Конец",18} {"Факт,с",8} {"Опт,с",8}");
-        sb.AppendLine($"  {new string('-', 120)}");
+        // === ФАКТИЧЕСКИЙ ЛОГ (по времени) ===
+        sb.AppendLine("--- ФАКТИЧЕСКИЙ ЛОГ ПАЛЕТ (по времени) ---");
+        sb.AppendLine($"  {"#",-4} {"Тип",-5} {"Маршрут",-6} {"Работник",-22} {"Начало",-17} {"Конец",-17} {"Факт",6} {"Дейст",5} {"Вес",7} {"Связанная задача"}");
+        sb.AppendLine($"  {new string('-', 130)}");
 
         int num = 1;
         foreach (var td in result.TaskDetails)
         {
             var typeShort = td.TaskType == "Replenishment" ? "Repl" : "Dist";
-            var worker = td.WorkerCode.Length > 9 ? td.WorkerCode[..9] : td.WorkerCode;
-            var optWorker = (td.OptimizedWorkerCode ?? td.WorkerCode);
-            optWorker = optWorker.Length > 9 ? optWorker[..9] : optWorker;
+            var workerStr = FormatWorkerShort(td.WorkerCode, td.WorkerName);
             var startStr = td.StartedAt.HasValue ? td.StartedAt.Value.ToString("dd.MM HH:mm:ss") : "n/a";
             var endStr = td.CompletedAt.HasValue ? td.CompletedAt.Value.ToString("dd.MM HH:mm:ss") : "n/a";
-            var actualSec = td.ActualDurationSec.HasValue ? $"{td.ActualDurationSec:F0}" : "n/a";
+            var durStr = td.ActualDurationSec.HasValue ? FormatSecShort(td.ActualDurationSec.Value) : "n/a";
 
-            sb.AppendLine($"  {num,-4} {typeShort,-6} {worker,-10} {optWorker,-10} {td.Route,-6} {td.ActionCount,5} {td.TotalWeightKg,8:F1} {td.TotalQty,6} {startStr,18} {endStr,18} {actualSec,8} {td.OptimizedDurationSec,8:F0}");
+            // Связанная задача
+            var linkedStr = "";
+            if (td.LinkedWorkerCode != null)
+            {
+                var linkedType = td.TaskType == "Replenishment" ? "dist" : "repl";
+                var linkedWorker = FormatWorkerShort(td.LinkedWorkerCode, td.LinkedWorkerName ?? "");
+                var linkedDur = td.LinkedActualDurationSec.HasValue
+                    ? FormatSecShort(td.LinkedActualDurationSec.Value) : "?";
+                linkedStr = $"{linkedType}: {linkedWorker} {linkedDur}";
+            }
+
+            sb.AppendLine($"  {num,-4} {typeShort,-5} {td.Route,-6} {workerStr,-22} {startStr,-17} {endStr,-17} {durStr,6} {td.ActionCount,5} {td.TotalWeightKg,7:F1} {linkedStr}");
+            num++;
+        }
+        sb.AppendLine();
+
+        // === ОПТИМИЗИРОВАННЫЙ ПЛАН ===
+        sb.AppendLine("--- ОПТИМИЗИРОВАННЫЙ ПЛАН ПАЛЕТ ---");
+        sb.AppendLine($"  {"#",-4} {"Тип",-5} {"Маршрут",-6} {"Факт работник",-22} {"→Опт работник",-22} {"Факт",6} {"→Опт",6} {"Связь: факт→опт"}");
+        sb.AppendLine($"  {new string('-', 110)}");
+
+        num = 1;
+        foreach (var td in result.TaskDetails)
+        {
+            var typeShort = td.TaskType == "Replenishment" ? "Repl" : "Dist";
+            var workerFact = FormatWorkerShort(td.WorkerCode, td.WorkerName);
+            var workerOpt = FormatWorkerShort(td.OptimizedWorkerCode ?? td.WorkerCode, "");
+            var durFact = td.ActualDurationSec.HasValue ? FormatSecShort(td.ActualDurationSec.Value) : "n/a";
+            var durOpt = FormatSecShort(td.OptimizedDurationSec);
+
+            // Связанная задача: факт→опт
+            var linkedStr = "";
+            if (td.LinkedWorkerCode != null)
+            {
+                var linkedType = td.TaskType == "Replenishment" ? "dist" : "repl";
+                var lFactW = FormatWorkerShort(td.LinkedWorkerCode, "");
+                var lOptW = FormatWorkerShort(td.LinkedOptWorkerCode ?? td.LinkedWorkerCode, "");
+                var lFactD = td.LinkedActualDurationSec.HasValue
+                    ? FormatSecShort(td.LinkedActualDurationSec.Value) : "?";
+                var lOptD = td.LinkedOptDurationSec.HasValue
+                    ? FormatSecShort(td.LinkedOptDurationSec.Value) : "?";
+                linkedStr = $"{linkedType}: {lFactW} {lFactD}→{lOptW} {lOptD}";
+            }
+
+            sb.AppendLine($"  {num,-4} {typeShort,-5} {td.Route,-6} {workerFact,-22} {workerOpt,-22} {durFact,6} {durOpt,6} {linkedStr}");
             num++;
         }
 
@@ -239,6 +281,29 @@ public static class BacktestReportWriter
         if (ts.TotalMinutes >= 1)
             return $"{(int)ts.TotalMinutes}м {ts.Seconds:D2}с";
         return $"{ts.TotalSeconds:F0}с";
+    }
+
+    private static string FormatWorkerShort(string code, string name)
+    {
+        if (string.IsNullOrEmpty(code)) return "—";
+        // Берём последние 3 цифры кода + фамилия
+        var shortCode = code.Length > 3 ? code[^3..] : code;
+        if (!string.IsNullOrEmpty(name))
+        {
+            var surname = name.Split(' ')[0];
+            if (surname.Length > 10) surname = surname[..10];
+            return $"{shortCode} {surname}";
+        }
+        return shortCode;
+    }
+
+    private static string FormatSecShort(double sec)
+    {
+        if (sec >= 3600)
+            return $"{sec / 3600:F1}ч";
+        if (sec >= 60)
+            return $"{sec / 60:F0}м{(int)(sec % 60):D2}с";
+        return $"{sec:F0}с";
     }
 
     private static string FormatDurationShort(TimeSpan ts)
