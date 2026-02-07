@@ -531,7 +531,7 @@ public class WaveBacktestService
 
         // === Worker-day capacity (по TaskType, не TemplateCode) ===
         var forkliftDayData = allAnnotated
-            .Where(a => a.TaskType == "Replenishment")
+            .Where(a => a.TaskType == "Replenishment" && !string.IsNullOrWhiteSpace(a.OriginalWorkerCode))
             .GroupBy(a => (a.OriginalWorkerCode, a.Day))
             .Select(g => new
             {
@@ -542,7 +542,7 @@ public class WaveBacktestService
             }).ToList();
 
         var pickerDayData = allAnnotated
-            .Where(a => a.TaskType == "Distribution")
+            .Where(a => a.TaskType == "Distribution" && !string.IsNullOrWhiteSpace(a.OriginalWorkerCode))
             .GroupBy(a => (a.OriginalWorkerCode, a.Day))
             .Select(g => new
             {

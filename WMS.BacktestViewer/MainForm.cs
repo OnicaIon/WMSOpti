@@ -173,7 +173,7 @@ namespace WMS.BacktestViewer
             // Колонки TreeList (левая панель — дерево)
             gantt.Columns.AddRange(new TreeListColumn[]
             {
-                new TreeListColumn { FieldName = "Name", Caption = "Работник / Задача", VisibleIndex = 0, Width = 220 },
+                new TreeListColumn { FieldName = "Name", Caption = "Работник / Задача", VisibleIndex = 0, Width = 280 },
                 new TreeListColumn { FieldName = "TaskType", Caption = "Тип", VisibleIndex = 1, Width = 40 },
                 new TreeListColumn { FieldName = "Weight", Caption = "кг", VisibleIndex = 2, Width = 45 },
                 new TreeListColumn { FieldName = "DurationStr", Caption = "Время", VisibleIndex = 3, Width = 50 },
