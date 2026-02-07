@@ -17,6 +17,7 @@
 
   <ItemGroup>
     <PackageReference Include="DevExpress.Win.Gantt" Version="21.2.*" />
+    <PackageReference Include="DevExpress.Win.Grid" Version="21.2.*" />
   </ItemGroup>
 
 </Project>

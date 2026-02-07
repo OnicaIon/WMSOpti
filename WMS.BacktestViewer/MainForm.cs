@@ -6,6 +6,9 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using DevExpress.XtraGantt;
+using DevExpress.XtraGrid;
+using DevExpress.XtraGrid.Columns;
+using DevExpress.XtraGrid.Views.Grid;
 using DevExpress.XtraTreeList;
 using DevExpress.XtraTreeList.Columns;
 using WMS.BacktestViewer.Data;
@@ -28,7 +31,7 @@ namespace WMS.BacktestViewer
         private Button _btnLoad;
         private TabControl _tabGantt;
         private SplitContainer _splitMain;
-        private DataGridView _gridDecisions;
+        private GridControl _gridDecisions;
         private Label _lblStatus;
         private Label _lblSummary;
 
@@ -173,10 +176,9 @@ namespace WMS.BacktestViewer
             // Колонки TreeList (левая панель — дерево)
             gantt.Columns.AddRange(new TreeListColumn[]
             {
-                new TreeListColumn { FieldName = "Name", Caption = "Работник / Задача", VisibleIndex = 0, Width = 280 },
-                new TreeListColumn { FieldName = "TaskType", Caption = "Тип", VisibleIndex = 1, Width = 40 },
-                new TreeListColumn { FieldName = "Weight", Caption = "кг", VisibleIndex = 2, Width = 45 },
-                new TreeListColumn { FieldName = "DurationStr", Caption = "Время", VisibleIndex = 3, Width = 50 },
+                new TreeListColumn { FieldName = "Name", Caption = "Работник / Задача", VisibleIndex = 0, Width = 300 },
+                new TreeListColumn { FieldName = "Weight", Caption = "кг", VisibleIndex = 1, Width = 45 },
+                new TreeListColumn { FieldName = "DurationStr", Caption = "Время", VisibleIndex = 2, Width = 50 },
             });
 
             // Маппинг полей для Ганта
@@ -316,37 +318,47 @@ namespace WMS.BacktestViewer
             return $"{totalSec / 3600:F1}ч";
         }
 
-        private DataGridView CreateDecisionsGrid()
+        private GridControl CreateDecisionsGrid()
         {
-            var grid = new DataGridView
+            var grid = new GridControl { Dock = DockStyle.Fill };
+            var view = new GridView(grid);
+            grid.MainView = view;
+
+            view.Columns.AddRange(new GridColumn[]
             {
-                Dock = DockStyle.Fill,
-                ReadOnly = true,
-                AllowUserToAddRows = false,
-                AllowUserToDeleteRows = false,
-                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
-                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
-                RowHeadersVisible = false,
-                Font = new Font("Consolas", 8),
-                RowTemplate = { Height = 20 },
-                AlternatingRowsDefaultCellStyle = new DataGridViewCellStyle
-                {
-                    BackColor = Color.FromArgb(255, 250, 240)
-                }
-            };
-            grid.Columns.AddRange(new DataGridViewColumn[]
-            {
-                new DataGridViewTextBoxColumn { Name = "Seq", HeaderText = "#", FillWeight = 25 },
-                new DataGridViewTextBoxColumn { Name = "Day", HeaderText = "День", FillWeight = 40 },
-                new DataGridViewTextBoxColumn { Name = "Type", HeaderText = "Решение", FillWeight = 60 },
-                new DataGridViewTextBoxColumn { Name = "Worker", HeaderText = "Работник", FillWeight = 55 },
-                new DataGridViewTextBoxColumn { Name = "Priority", HeaderText = "Приор.", FillWeight = 35 },
-                new DataGridViewTextBoxColumn { Name = "Duration", HeaderText = "Сек", FillWeight = 30 },
-                new DataGridViewTextBoxColumn { Name = "Weight", HeaderText = "кг", FillWeight = 35 },
-                new DataGridViewTextBoxColumn { Name = "Buffer", HeaderText = "Буфер", FillWeight = 45 },
-                new DataGridViewTextBoxColumn { Name = "Constraint", HeaderText = "Огранич.", FillWeight = 55 },
-                new DataGridViewTextBoxColumn { Name = "Reason", HeaderText = "Причина", FillWeight = 160 },
+                new GridColumn { FieldName = "Seq", Caption = "#", Width = 35, VisibleIndex = 0 },
+                new GridColumn { FieldName = "Day", Caption = "День", Width = 45, VisibleIndex = 1 },
+                new GridColumn { FieldName = "Type", Caption = "Решение", Width = 70, VisibleIndex = 2 },
+                new GridColumn { FieldName = "Worker", Caption = "Работник", Width = 120, VisibleIndex = 3 },
+                new GridColumn { FieldName = "Priority", Caption = "Приор.", Width = 50, VisibleIndex = 4 },
+                new GridColumn { FieldName = "Duration", Caption = "Сек", Width = 40, VisibleIndex = 5 },
+                new GridColumn { FieldName = "Weight", Caption = "кг", Width = 40, VisibleIndex = 6 },
+                new GridColumn { FieldName = "Buffer", Caption = "Буфер", Width = 55, VisibleIndex = 7 },
+                new GridColumn { FieldName = "Constraint", Caption = "Огранич.", Width = 65, VisibleIndex = 8 },
+                new GridColumn { FieldName = "Reason", Caption = "Причина", Width = 300, VisibleIndex = 9 },
             });
+
+            // Автофильтр в заголовках колонок
+            view.OptionsView.ShowAutoFilterRow = true;
+            view.OptionsView.ColumnAutoWidth = true;
+            view.OptionsBehavior.Editable = false;
+            view.OptionsSelection.MultiSelect = false;
+
+            // Чередование строк
+            view.OptionsView.EnableAppearanceEvenRow = true;
+            view.OptionsView.EnableAppearanceOddRow = true;
+            view.Appearance.EvenRow.BackColor = Color.FromArgb(255, 250, 240);
+
+            // Подсветка skip-решений
+            view.RowStyle += (sender, e) =>
+            {
+                var v = sender as GridView;
+                if (v == null) return;
+                var type = v.GetRowCellValue(e.RowHandle, "Type")?.ToString() ?? "";
+                if (type.StartsWith("skip"))
+                    e.Appearance.BackColor = Color.FromArgb(255, 220, 220);
+            };
+
             return grid;
         }
 
@@ -401,8 +413,18 @@ namespace WMS.BacktestViewer
                 SetGanttAppearance(_ganttFact);
                 SetGanttAppearance(_ganttOptimized);
 
+                // Имена работников для лога решений (из events)
+                var workerNameLookup = _allEvents
+                    .Where(e => !string.IsNullOrWhiteSpace(e.WorkerCode))
+                    .GroupBy(e => e.WorkerCode)
+                    .ToDictionary(g => g.Key, g =>
+                    {
+                        var n = g.Select(e => e.WorkerName).FirstOrDefault(n2 => !string.IsNullOrWhiteSpace(n2));
+                        return n ?? g.Key;
+                    });
+
                 // Лог решений
-                FillDecisionsGrid(_gridDecisions, _decisions);
+                FillDecisionsGrid(_gridDecisions, _decisions, workerNameLookup);
 
                 _lblSummary.Text = $"Факт: {factEvents.Count} | " +
                     $"Опт: {optEvents.Count} | " +
@@ -437,31 +459,46 @@ namespace WMS.BacktestViewer
             };
         }
 
-        private void FillDecisionsGrid(DataGridView grid, List<DecisionInfo> decisions)
+        private void FillDecisionsGrid(GridControl grid, List<DecisionInfo> decisions,
+            Dictionary<string, string> workerNameLookup)
         {
-            grid.Rows.Clear();
+            var dt = new DataTable();
+            dt.Columns.Add("Seq", typeof(int));
+            dt.Columns.Add("Day", typeof(string));
+            dt.Columns.Add("Type", typeof(string));
+            dt.Columns.Add("Worker", typeof(string));
+            dt.Columns.Add("Priority", typeof(string));
+            dt.Columns.Add("Duration", typeof(string));
+            dt.Columns.Add("Weight", typeof(string));
+            dt.Columns.Add("Buffer", typeof(string));
+            dt.Columns.Add("Constraint", typeof(string));
+            dt.Columns.Add("Reason", typeof(string));
+
             foreach (var d in decisions)
             {
-                grid.Rows.Add(
+                var workerDisplay = d.ChosenWorkerCode ?? "-";
+                if (!string.IsNullOrEmpty(d.ChosenWorkerCode)
+                    && workerNameLookup.TryGetValue(d.ChosenWorkerCode, out var name)
+                    && !string.IsNullOrWhiteSpace(name))
+                {
+                    workerDisplay = name;
+                }
+
+                dt.Rows.Add(
                     d.DecisionSeq,
                     d.DayDate.ToString("dd.MM"),
                     d.DecisionType,
-                    d.ChosenWorkerCode ?? "-",
+                    workerDisplay,
                     d.ChosenTaskPriority > 0 ? d.ChosenTaskPriority.ToString("F0") : "-",
                     d.ChosenTaskDurationSec > 0 ? d.ChosenTaskDurationSec.ToString("F0") : "-",
                     d.ChosenTaskWeightKg > 0 ? (d.ChosenTaskWeightKg / 1000m).ToString("F1") : "-",
                     $"{d.BufferLevelBefore}→{d.BufferLevelAfter}/{d.BufferCapacity}",
                     d.ActiveConstraint ?? "none",
-                    d.ReasonText
+                    d.ReasonText ?? ""
                 );
             }
 
-            foreach (DataGridViewRow row in grid.Rows)
-            {
-                var type = row.Cells["Type"].Value?.ToString() ?? "";
-                if (type.StartsWith("skip"))
-                    row.DefaultCellStyle.BackColor = Color.FromArgb(255, 220, 220);
-            }
+            grid.DataSource = dt;
         }
     }
 }
