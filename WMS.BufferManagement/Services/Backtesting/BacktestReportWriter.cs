@@ -199,22 +199,23 @@ public static class BacktestReportWriter
         sb.AppendLine($"  default (среднее ~{result.WaveMeanDurationSec:F1}с):   {result.DefaultEstimatesUsed} действий");
         sb.AppendLine();
 
-        // Детали заданий
-        sb.AppendLine("--- ДЕТАЛИ ЗАДАНИЙ ---");
-        sb.AppendLine($"  {"#",-4} {"Тип",-14} {"Работник",-12} {"Опт.работник",-12} {"Из ячейки",-18} {"В ячейку",-18} {"Зона",-6} {"Товар",-12} {"Вес,кг",8} {"Факт,с",8} {"Опт,с",8} {"Источник",-14}");
-        sb.AppendLine($"  {new string('-', 150)}");
+        // Детали палет (task groups)
+        sb.AppendLine("--- ДЕТАЛИ ПАЛЕТ ---");
+        sb.AppendLine($"  {"#",-4} {"Тип",-6} {"Работник",-10} {"→Опт",-10} {"Маршрут",-6} {"Дейст",5} {"Вес,кг",8} {"Кол-во",6} {"Начало",18} {"Конец",18} {"Факт,с",8} {"Опт,с",8}");
+        sb.AppendLine($"  {new string('-', 120)}");
 
         int num = 1;
         foreach (var td in result.TaskDetails)
         {
-            var fromBin = td.FromBin.Length > 16 ? td.FromBin[..16] : td.FromBin;
-            var toBin = td.ToBin.Length > 16 ? td.ToBin[..16] : td.ToBin;
-            var product = td.ProductCode.Length > 10 ? td.ProductCode[..10] : td.ProductCode;
+            var typeShort = td.TaskType == "Replenishment" ? "Repl" : "Dist";
+            var worker = td.WorkerCode.Length > 9 ? td.WorkerCode[..9] : td.WorkerCode;
+            var optWorker = (td.OptimizedWorkerCode ?? td.WorkerCode);
+            optWorker = optWorker.Length > 9 ? optWorker[..9] : optWorker;
+            var startStr = td.StartedAt.HasValue ? td.StartedAt.Value.ToString("dd.MM HH:mm:ss") : "n/a";
+            var endStr = td.CompletedAt.HasValue ? td.CompletedAt.Value.ToString("dd.MM HH:mm:ss") : "n/a";
             var actualSec = td.ActualDurationSec.HasValue ? $"{td.ActualDurationSec:F0}" : "n/a";
-            var route = $"{td.FromZone}→{td.ToZone}";
-            var optWorker = td.OptimizedWorkerCode ?? td.WorkerCode;
 
-            sb.AppendLine($"  {num,-4} {td.TaskType,-14} {td.WorkerCode,-12} {optWorker,-12} {fromBin,-18} {toBin,-18} {route,-6} {product,-12} {td.WeightKg,8:F1} {actualSec,8} {td.OptimizedDurationSec,8:F0} {td.DurationSource,-14}");
+            sb.AppendLine($"  {num,-4} {typeShort,-6} {worker,-10} {optWorker,-10} {td.Route,-6} {td.ActionCount,5} {td.TotalWeightKg,8:F1} {td.TotalQty,6} {startStr,18} {endStr,18} {actualSec,8} {td.OptimizedDurationSec,8:F0}");
             num++;
         }
 

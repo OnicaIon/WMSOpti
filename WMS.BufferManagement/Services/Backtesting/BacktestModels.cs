@@ -367,22 +367,27 @@ public class WorkerBreakdown
 }
 
 /// <summary>
-/// Детали одного задания (для подробного отчёта в файл)
+/// Детали одной палеты (task group) для подробного отчёта.
+/// Одна строка = одна палета (rtWMSProductSelection), НЕ отдельное действие.
 /// </summary>
 public class TaskDetail
 {
     public string TaskNumber { get; set; } = string.Empty;
+    public string TaskRef { get; set; } = string.Empty;
     public string WorkerCode { get; set; } = string.Empty;
+    public string WorkerName { get; set; } = string.Empty;
     public string TaskType { get; set; } = string.Empty; // Replenishment / Distribution
-    public string FromBin { get; set; } = string.Empty;
-    public string ToBin { get; set; } = string.Empty;
-    public string FromZone { get; set; } = string.Empty;
-    public string ToZone { get; set; } = string.Empty;
-    public string ProductCode { get; set; } = string.Empty;
-    public decimal WeightKg { get; set; }
-    public int Qty { get; set; }
+    public string Route { get; set; } = string.Empty; // "A→I"
+    public int ActionCount { get; set; }
+    public decimal TotalWeightKg { get; set; }
+    public int TotalQty { get; set; }
+
+    // Фактическое время палеты (от первого действия до последнего)
+    public DateTime? StartedAt { get; set; }
+    public DateTime? CompletedAt { get; set; }
     public double? ActualDurationSec { get; set; }
+
+    // Оптимизация
     public double OptimizedDurationSec { get; set; }
-    public string DurationSource { get; set; } = string.Empty;
     public string? OptimizedWorkerCode { get; set; }
 }

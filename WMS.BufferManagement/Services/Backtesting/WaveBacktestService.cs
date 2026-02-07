@@ -806,48 +806,64 @@ public class WaveBacktestService
             });
         }
 
-        // Детали заданий
+        // Детали заданий — per pallet (task group), НЕ per action
         var taskDetails = new List<TaskDetail>();
         var allGroups = data.ReplenishmentTasks.Concat(data.DistributionTasks).ToList();
+
+        // Маппинг TaskRef → оптимизированный работник (из plan assignments)
+        var optWorkerByRef = new Dictionary<string, string>();
+        foreach (var (wc, actions) in plan.WorkerAssignments)
+        {
+            foreach (var tgRef in actions.Select(a => a.TaskGroupRef).Distinct())
+            {
+                if (!string.IsNullOrEmpty(tgRef))
+                    optWorkerByRef[tgRef] = wc;
+            }
+        }
+
+        // Маппинг TaskRef → оптимизированная длительность (сумма DurationSec действий из плана)
+        var optDurationByRef = plan.WorkerAssignments
+            .SelectMany(kv => kv.Value)
+            .Where(a => !string.IsNullOrEmpty(a.TaskGroupRef))
+            .GroupBy(a => a.TaskGroupRef)
+            .ToDictionary(g => g.Key, g => g.Sum(a => a.DurationSec));
 
         foreach (var group in allGroups)
         {
             var taskType = data.ReplenishmentTasks.Contains(group) ? "Replenishment" : "Distribution";
+            var actions = group.Actions;
 
-            foreach (var action in group.Actions)
+            // Реальные timestamps палеты
+            var starts = actions.Where(a => a.StartedAt.HasValue).Select(a => a.StartedAt!.Value).ToList();
+            var ends = actions.Where(a => a.CompletedAt.HasValue).Select(a => a.CompletedAt!.Value).ToList();
+            var groupStart = starts.Any() ? starts.Min() : (DateTime?)null;
+            var groupEnd = ends.Any() ? ends.Max() : (DateTime?)null;
+            var groupDuration = (groupStart.HasValue && groupEnd.HasValue && groupEnd > groupStart)
+                ? (groupEnd.Value - groupStart.Value).TotalSeconds : (double?)null;
+
+            // Маршрут (зона→зона первого действия)
+            var route = actions.Any()
+                ? $"{ExtractZone(actions[0].StorageBin)}→{ExtractZone(actions[0].AllocationBin)}"
+                : "?→?";
+
+            taskDetails.Add(new TaskDetail
             {
-                // Ищем оптимизированное время для этого действия
-                var simAction = simulated.WorkerTimelines
-                    .SelectMany(w => w.Actions)
-                    .FirstOrDefault(a => a.FromBin == action.StorageBin &&
-                                         a.ToBin == action.AllocationBin &&
-                                         a.ProductCode == action.ProductCode);
-
-                // Ищем, кому было переназначено
-                var optimizedWorker = plan.WorkerAssignments
-                    .FirstOrDefault(kvp => kvp.Value.Any(a =>
-                        a.FromBin == action.StorageBin &&
-                        a.ToBin == action.AllocationBin &&
-                        a.ProductCode == action.ProductCode));
-
-                taskDetails.Add(new TaskDetail
-                {
-                    TaskNumber = group.TaskNumber,
-                    WorkerCode = group.AssigneeCode,
-                    TaskType = taskType,
-                    FromBin = action.StorageBin,
-                    ToBin = action.AllocationBin,
-                    FromZone = ExtractZone(action.StorageBin),
-                    ToZone = ExtractZone(action.AllocationBin),
-                    ProductCode = action.ProductCode,
-                    WeightKg = action.WeightKg,
-                    Qty = action.QtyFact > 0 ? action.QtyFact : action.QtyPlan,
-                    ActualDurationSec = action.DurationSec,
-                    OptimizedDurationSec = simAction?.EstimatedDurationSec ?? DefaultRouteDurationSec,
-                    DurationSource = simAction?.DurationSource ?? "default",
-                    OptimizedWorkerCode = optimizedWorker.Key
-                });
-            }
+                TaskNumber = group.TaskNumber,
+                TaskRef = group.TaskRef,
+                WorkerCode = group.AssigneeCode,
+                WorkerName = group.AssigneeName,
+                TaskType = taskType,
+                Route = route,
+                ActionCount = actions.Count,
+                TotalWeightKg = actions.Sum(a => a.WeightKg),
+                TotalQty = actions.Sum(a => a.QtyFact > 0 ? a.QtyFact : a.QtyPlan),
+                StartedAt = groupStart,
+                CompletedAt = groupEnd,
+                ActualDurationSec = groupDuration,
+                OptimizedDurationSec = optDurationByRef.GetValueOrDefault(group.TaskRef,
+                    groupDuration ?? DefaultRouteDurationSec),
+                OptimizedWorkerCode = optWorkerByRef.GetValueOrDefault(group.TaskRef)
+            });
         }
 
         // Подсчёт источников оценки
@@ -867,7 +883,8 @@ public class WaveBacktestService
             WaveStatus = data.Status,
             TotalReplenishmentTasks = data.ReplenishmentTasks.Sum(g => g.Actions.Count),
             TotalDistributionTasks = data.DistributionTasks.Sum(g => g.Actions.Count),
-            TotalActions = taskDetails.Count,
+            TotalActions = data.ReplenishmentTasks.Sum(g => g.Actions.Count) +
+                           data.DistributionTasks.Sum(g => g.Actions.Count),
             UniqueWorkers = actual.WorkerTimelines.Count,
             ActualStartTime = actual.StartTime,
             ActualEndTime = actual.EndTime,
