@@ -686,10 +686,100 @@ public class WaveBacktestService
             });
         }
 
+        // Если задачи остались — добавляем виртуальные дни с capacity самого продуктивного дня
         if (replPool.Any() || distPool.Any())
         {
-            _logger.LogWarning("Кросс-дневная оптимизация: остались неназначенные задачи — {Repl} repl, {Dist} dist",
+            _logger.LogInformation("Остались неназначенные задачи ({Repl} repl, {Dist} dist) — добавляем виртуальные дни",
                 replPool.Count, distPool.Count);
+
+            // Capacity самого продуктивного дня (max задач)
+            var bestForklifts = forkliftDayData
+                .GroupBy(w => w.Day)
+                .OrderByDescending(g => g.Sum(w => w.CapacitySec))
+                .FirstOrDefault()?.ToDictionary(w => w.WorkerCode, w => w.CapacitySec)
+                ?? new Dictionary<string, double>();
+            var bestPickers = pickerDayData
+                .GroupBy(w => w.Day)
+                .OrderByDescending(g => g.Sum(w => w.CapacitySec))
+                .FirstOrDefault()?.ToDictionary(w => w.WorkerCode, w => w.CapacitySec)
+                ?? new Dictionary<string, double>();
+
+            var lastDay = allDays.Last();
+            var maxExtraDays = 30; // защита от бесконечного цикла
+
+            for (int extraDay = 1; extraDay <= maxExtraDays && (replPool.Any() || distPool.Any()); extraDay++)
+            {
+                var virtualDay = lastDay.AddDays(extraDay);
+                var bufferStart = bufferLevel;
+
+                var (replDoneV, distDoneV, dayAssignmentsV, dayMakespanV) = SimulateDay(
+                    replPool, distPool, completedRepl,
+                    new Dictionary<string, double>(bestForklifts),
+                    new Dictionary<string, double>(bestPickers),
+                    ref bufferLevel, _bufferCapacity,
+                    forkliftTransitionSec, pickerTransitionSec,
+                    virtualDay, decisionCtx, workerNames);
+
+                if (replDoneV + distDoneV == 0)
+                    break; // нет прогресса — выходим
+
+                foreach (var (wc, actions) in dayAssignmentsV)
+                {
+                    if (!mergedPlan.WorkerAssignments.ContainsKey(wc))
+                        mergedPlan.WorkerAssignments[wc] = new List<ActionTiming>();
+                    mergedPlan.WorkerAssignments[wc].AddRange(actions);
+                }
+
+                foreach (var (wc, actions) in dayAssignmentsV)
+                {
+                    if (!actions.Any()) continue;
+                    var swt = new SimulatedWorkerTimeline
+                    {
+                        WorkerCode = wc,
+                        WorkerName = workerNames.GetValueOrDefault(wc, ""),
+                        Duration = TimeSpan.FromSeconds(actions.Sum(a => a.DurationSec)),
+                        TaskCount = actions.Count
+                    };
+                    foreach (var at in actions)
+                    {
+                        var (estSec, source) = EstimateActionDuration(
+                            at, wc, routeLookup, pickerLookup, waveMeanDurationSec);
+                        swt.Actions.Add(new SimulatedAction
+                        {
+                            FromBin = at.FromBin, ToBin = at.ToBin,
+                            FromZone = at.FromZone, ToZone = at.ToZone,
+                            ProductCode = at.ProductCode, WeightKg = at.WeightKg,
+                            EstimatedDurationSec = estSec, DurationSource = source
+                        });
+                    }
+                    allSimWorkers.Add(swt);
+                }
+
+                dayBreakdowns.Add(new DayBreakdown
+                {
+                    Date = virtualDay,
+                    Workers = bestForklifts.Count + bestPickers.Count,
+                    ForkliftWorkers = bestForklifts.Count,
+                    PickerWorkers = bestPickers.Count,
+                    OptimizedMakespan = dayMakespanV,
+                    OriginalReplGroups = 0,
+                    OriginalDistGroups = 0,
+                    OptimizedReplGroups = replDoneV,
+                    OptimizedDistGroups = distDoneV,
+                    AdditionalPallets = replDoneV + distDoneV,
+                    BufferLevelStart = bufferStart,
+                    BufferLevelEnd = bufferLevel
+                });
+
+                _logger.LogInformation("  Виртуальный день {Day}: +{Repl} repl, +{Dist} dist (осталось {ReplLeft} repl, {DistLeft} dist)",
+                    virtualDay.ToString("dd.MM"), replDoneV, distDoneV, replPool.Count, distPool.Count);
+            }
+
+            if (replPool.Any() || distPool.Any())
+            {
+                _logger.LogWarning("После {MaxDays} виртуальных дней остались: {Repl} repl, {Dist} dist",
+                    maxExtraDays, replPool.Count, distPool.Count);
+            }
         }
 
         // Агрегация SimulatedWorkerTimeline по работникам
@@ -1071,10 +1161,14 @@ public class WaveBacktestService
         List<DayBreakdown> dayBreakdowns,
         Dictionary<string, double>? priorityByRef = null)
     {
-        // Итоговое сравнение: сумма per-day active vs сумма per-day makespans
+        // Итоговое сравнение: сумма активного времени по всем работникам
         var actualDuration = TimeSpan.FromSeconds(
             dayBreakdowns.Sum(d => d.ActualActiveDuration.TotalSeconds));
-        var optimizedDuration = simulated.TotalDuration;
+
+        // Оптимизированное = сумма длительностей всех назначенных задач (work time, не makespan)
+        var optimizedWorkSec = simulated.WorkerTimelines.Sum(w => w.Duration.TotalSeconds);
+        var optimizedDuration = TimeSpan.FromSeconds(optimizedWorkSec);
+
         var improvementTime = actualDuration - optimizedDuration;
         var improvementPercent = actualDuration.TotalSeconds > 0
             ? (improvementTime.TotalSeconds / actualDuration.TotalSeconds) * 100
