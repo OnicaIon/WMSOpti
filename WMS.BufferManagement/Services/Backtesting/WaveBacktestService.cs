@@ -828,44 +828,55 @@ public class WaveBacktestService
             .GroupBy(a => a.TaskGroupRef)
             .ToDictionary(g => g.Key, g => g.Sum(a => a.DurationSec));
 
-        foreach (var group in allGroups)
-        {
-            var taskType = data.ReplenishmentTasks.Contains(group) ? "Replenishment" : "Distribution";
-            var actions = group.Actions;
-
-            // Реальные timestamps палеты
-            var starts = actions.Where(a => a.StartedAt.HasValue).Select(a => a.StartedAt!.Value).ToList();
-            var ends = actions.Where(a => a.CompletedAt.HasValue).Select(a => a.CompletedAt!.Value).ToList();
-            var groupStart = starts.Any() ? starts.Min() : (DateTime?)null;
-            var groupEnd = ends.Any() ? ends.Max() : (DateTime?)null;
-            var groupDuration = (groupStart.HasValue && groupEnd.HasValue && groupEnd > groupStart)
-                ? (groupEnd.Value - groupStart.Value).TotalSeconds : (double?)null;
-
-            // Маршрут (зона→зона первого действия)
-            var route = actions.Any()
-                ? $"{ExtractZone(actions[0].StorageBin)}→{ExtractZone(actions[0].AllocationBin)}"
-                : "?→?";
-
-            taskDetails.Add(new TaskDetail
+        // Объединяем task groups с одинаковым TaskRef (одна палета = все действия)
+        var replRefs = new HashSet<string>(data.ReplenishmentTasks.Select(g => g.TaskRef));
+        var mergedGroups = allGroups
+            .GroupBy(g => g.TaskRef)
+            .Select(grp =>
             {
-                TaskNumber = group.TaskNumber,
-                TaskRef = group.TaskRef,
-                PrevTaskRef = group.PrevTaskRef,
-                WorkerCode = group.AssigneeCode,
-                WorkerName = group.AssigneeName,
-                TaskType = taskType,
-                Route = route,
-                ActionCount = actions.Count,
-                TotalWeightKg = actions.Sum(a => a.WeightKg),
-                TotalQty = actions.Sum(a => a.QtyFact > 0 ? a.QtyFact : a.QtyPlan),
-                StartedAt = groupStart,
-                CompletedAt = groupEnd,
-                ActualDurationSec = groupDuration,
-                OptimizedDurationSec = optDurationByRef.GetValueOrDefault(group.TaskRef,
-                    groupDuration ?? DefaultRouteDurationSec),
-                OptimizedWorkerCode = optWorkerByRef.GetValueOrDefault(group.TaskRef)
-            });
-        }
+                var first = grp.First();
+                var allActions = grp.SelectMany(g => g.Actions).ToList();
+                var taskType = replRefs.Contains(grp.Key) ? "Replenishment" : "Distribution";
+
+                // Реальные timestamps палеты (от первого действия до последнего)
+                var starts = allActions.Where(a => a.StartedAt.HasValue).Select(a => a.StartedAt!.Value).ToList();
+                var ends = allActions.Where(a => a.CompletedAt.HasValue).Select(a => a.CompletedAt!.Value).ToList();
+                var groupStart = starts.Any() ? starts.Min() : (DateTime?)null;
+                var groupEnd = ends.Any() ? ends.Max() : (DateTime?)null;
+                var groupDuration = (groupStart.HasValue && groupEnd.HasValue && groupEnd > groupStart)
+                    ? (groupEnd.Value - groupStart.Value).TotalSeconds : (double?)null;
+
+                // Маршрут и ячейки
+                var firstAction = allActions.FirstOrDefault();
+                var lastAction = allActions.LastOrDefault();
+                var fromBin = firstAction?.StorageBin ?? "";
+                var toBin = firstAction?.AllocationBin ?? "";
+                var route = $"{ExtractZone(fromBin)}→{ExtractZone(toBin)}";
+
+                return new TaskDetail
+                {
+                    TaskNumber = first.TaskNumber,
+                    TaskRef = grp.Key,
+                    PrevTaskRef = first.PrevTaskRef,
+                    WorkerCode = first.AssigneeCode,
+                    WorkerName = first.AssigneeName,
+                    TaskType = taskType,
+                    Route = route,
+                    FromBin = fromBin,
+                    ToBin = toBin,
+                    ActionCount = allActions.Count,
+                    TotalWeightKg = allActions.Sum(a => a.WeightKg),
+                    TotalQty = allActions.Sum(a => a.QtyFact > 0 ? a.QtyFact : a.QtyPlan),
+                    StartedAt = groupStart,
+                    CompletedAt = groupEnd,
+                    ActualDurationSec = groupDuration,
+                    OptimizedDurationSec = optDurationByRef.GetValueOrDefault(grp.Key,
+                        groupDuration ?? DefaultRouteDurationSec),
+                    OptimizedWorkerCode = optWorkerByRef.GetValueOrDefault(grp.Key)
+                };
+            }).ToList();
+
+        taskDetails.AddRange(mergedGroups);
 
         // Связать repl↔dist через PrevTaskRef
         var detailByRef = taskDetails

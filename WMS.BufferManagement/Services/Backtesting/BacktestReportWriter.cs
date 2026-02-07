@@ -201,14 +201,16 @@ public static class BacktestReportWriter
 
         // === ФАКТИЧЕСКИЙ ЛОГ (по времени) ===
         sb.AppendLine("--- ФАКТИЧЕСКИЙ ЛОГ ПАЛЕТ (по времени) ---");
-        sb.AppendLine($"  {"#",-4} {"Тип",-5} {"Маршрут",-6} {"Работник",-22} {"Начало",-17} {"Конец",-17} {"Факт",6} {"Дейст",5} {"Вес",7} {"Связанная задача"}");
-        sb.AppendLine($"  {new string('-', 130)}");
+        sb.AppendLine($"  {"#",-4} {"Тип",-5} {"Откуда",-16} {"Куда",-16} {"Работник",-18} {"Начало",-17} {"Конец",-17} {"Факт",6} {"Д",2} {"Вес",7} {"Связь (кто и сколько)"}");
+        sb.AppendLine($"  {new string('-', 155)}");
 
         int num = 1;
         foreach (var td in result.TaskDetails)
         {
             var typeShort = td.TaskType == "Replenishment" ? "Repl" : "Dist";
             var workerStr = FormatWorkerShort(td.WorkerCode, td.WorkerName);
+            var fromBin = td.FromBin.Length > 14 ? td.FromBin[..14] : td.FromBin;
+            var toBin = td.ToBin.Length > 14 ? td.ToBin[..14] : td.ToBin;
             var startStr = td.StartedAt.HasValue ? td.StartedAt.Value.ToString("dd.MM HH:mm:ss") : "n/a";
             var endStr = td.CompletedAt.HasValue ? td.CompletedAt.Value.ToString("dd.MM HH:mm:ss") : "n/a";
             var durStr = td.ActualDurationSec.HasValue ? FormatSecShort(td.ActualDurationSec.Value) : "n/a";
@@ -224,20 +226,22 @@ public static class BacktestReportWriter
                 linkedStr = $"{linkedType}: {linkedWorker} {linkedDur}";
             }
 
-            sb.AppendLine($"  {num,-4} {typeShort,-5} {td.Route,-6} {workerStr,-22} {startStr,-17} {endStr,-17} {durStr,6} {td.ActionCount,5} {td.TotalWeightKg,7:F1} {linkedStr}");
+            sb.AppendLine($"  {num,-4} {typeShort,-5} {fromBin,-16} {toBin,-16} {workerStr,-18} {startStr,-17} {endStr,-17} {durStr,6} {td.ActionCount,2} {td.TotalWeightKg,7:F1} {linkedStr}");
             num++;
         }
         sb.AppendLine();
 
         // === ОПТИМИЗИРОВАННЫЙ ПЛАН ===
         sb.AppendLine("--- ОПТИМИЗИРОВАННЫЙ ПЛАН ПАЛЕТ ---");
-        sb.AppendLine($"  {"#",-4} {"Тип",-5} {"Маршрут",-6} {"Факт работник",-22} {"→Опт работник",-22} {"Факт",6} {"→Опт",6} {"Связь: факт→опт"}");
-        sb.AppendLine($"  {new string('-', 110)}");
+        sb.AppendLine($"  {"#",-4} {"Тип",-5} {"Откуда",-16} {"Куда",-16} {"Факт работник",-18} {"→Опт работник",-18} {"Факт",6} {"→Опт",6} {"Связь: факт→опт"}");
+        sb.AppendLine($"  {new string('-', 140)}");
 
         num = 1;
         foreach (var td in result.TaskDetails)
         {
             var typeShort = td.TaskType == "Replenishment" ? "Repl" : "Dist";
+            var fromBin = td.FromBin.Length > 14 ? td.FromBin[..14] : td.FromBin;
+            var toBin = td.ToBin.Length > 14 ? td.ToBin[..14] : td.ToBin;
             var workerFact = FormatWorkerShort(td.WorkerCode, td.WorkerName);
             var workerOpt = FormatWorkerShort(td.OptimizedWorkerCode ?? td.WorkerCode, "");
             var durFact = td.ActualDurationSec.HasValue ? FormatSecShort(td.ActualDurationSec.Value) : "n/a";
@@ -257,7 +261,7 @@ public static class BacktestReportWriter
                 linkedStr = $"{linkedType}: {lFactW} {lFactD}→{lOptW} {lOptD}";
             }
 
-            sb.AppendLine($"  {num,-4} {typeShort,-5} {td.Route,-6} {workerFact,-22} {workerOpt,-22} {durFact,6} {durOpt,6} {linkedStr}");
+            sb.AppendLine($"  {num,-4} {typeShort,-5} {fromBin,-16} {toBin,-16} {workerFact,-18} {workerOpt,-18} {durFact,6} {durOpt,6} {linkedStr}");
             num++;
         }
 

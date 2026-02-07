@@ -379,6 +379,8 @@ public class TaskDetail
     public string WorkerName { get; set; } = string.Empty;
     public string TaskType { get; set; } = string.Empty; // Replenishment / Distribution
     public string Route { get; set; } = string.Empty; // "A→I"
+    public string FromBin { get; set; } = string.Empty; // Откуда (ячейка)
+    public string ToBin { get; set; } = string.Empty;   // Куда (ячейка)
     public int ActionCount { get; set; }
     public decimal TotalWeightKg { get; set; }
     public int TotalQty { get; set; }
