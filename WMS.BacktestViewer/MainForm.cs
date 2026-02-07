@@ -209,85 +209,100 @@ namespace WMS.BacktestViewer
             dt.Columns.Add("Progress", typeof(double));
             dt.Columns.Add("Tooltip", typeof(string));
 
-            var workerGroups = events
-                .GroupBy(e => e.WorkerCode)
-                .OrderBy(g => g.First().WorkerRole)
-                .ThenBy(g => g.Key)
+            // 3-уровневая иерархия: Роль → Работник → Задачи
+            var roleGroups = events
+                .GroupBy(e => e.WorkerRole ?? "Unknown")
+                .OrderBy(g => g.Key)
                 .ToList();
 
             int nextId = 1;
-            foreach (var wg in workerGroups)
+            foreach (var rg in roleGroups)
             {
-                var first = wg.First();
-                var workerId = nextId++;
-                var workerTasks = wg.OrderBy(e => e.StartTime).ToList();
+                var roleId = nextId++;
+                var roleName = rg.Key == "Forklift" ? "Форклифты" : rg.Key == "Picker" ? "Пикеры" : rg.Key;
+                var roleEvents = rg.ToList();
+                var roleStart = roleEvents.Min(e => e.StartTime);
+                var roleEnd = roleEvents.Max(e => e.EndTime);
+                var roleTotalDur = roleEvents.Sum(e => e.DurationSec);
+                var roleWeightKg = roleEvents.Sum(e => e.WeightKg) / 1000m;
+                var roleWorkerCount = roleEvents.Select(e => e.WorkerCode).Distinct().Count();
 
-                var workerStart = workerTasks.Min(e => e.StartTime);
-                var workerEnd = workerTasks.Max(e => e.EndTime);
-                var totalDur = workerTasks.Sum(e => e.DurationSec);
-                var totalWeightKg = workerTasks.Sum(e => e.WeightKg) / 1000m;
-                var role = first.WorkerRole ?? "?";
-                var roleShort = role == "Forklift" ? "FK" : role == "Picker" ? "PK" : "??";
-
+                // Уровень 1: Роль
                 dt.Rows.Add(
-                    workerId,
+                    roleId,
                     DBNull.Value,
-                    $"{roleShort} {first.WorkerName ?? first.WorkerCode}",
-                    roleShort,
-                    $"{totalWeightKg:F0}",
-                    FormatDuration(totalDur),
-                    $"{workerTasks.Count} задач",
-                    workerStart,
-                    workerEnd,
+                    $"{roleName} ({roleWorkerCount} чел.)",
+                    "",
+                    $"{roleWeightKg:F0}",
+                    FormatDuration(roleTotalDur),
+                    $"{roleName}: {roleEvents.Count} задач",
+                    roleStart,
+                    roleEnd,
                     100.0,
-                    $"{role}: {first.WorkerCode} ({first.WorkerName})\n" +
-                    $"Задач: {workerTasks.Count}, Вес: {totalWeightKg:F1} кг\n" +
-                    $"Время: {FormatDuration(totalDur)}\n" +
-                    $"{workerStart:dd.MM HH:mm} — {workerEnd:dd.MM HH:mm}"
+                    ""
                 );
 
-                foreach (var task in workerTasks)
+                var workerGroups = rg
+                    .GroupBy(e => e.WorkerCode)
+                    .OrderBy(g => g.Key)
+                    .ToList();
+
+                foreach (var wg in workerGroups)
                 {
-                    var taskId = nextId++;
-                    var weightKg = task.WeightKg / 1000m;
-                    var typeChar = (task.TaskType ?? "").StartsWith("Repl") ? "R" : "D";
-                    var fromZ = string.IsNullOrEmpty(task.FromZone) || task.FromZone == "?" ? "" : task.FromZone;
-                    var toZ = string.IsNullOrEmpty(task.ToZone) || task.ToZone == "?" ? "" : task.ToZone;
-                    var route = (!string.IsNullOrEmpty(fromZ) && !string.IsNullOrEmpty(toZ))
-                        ? $"{fromZ}→{toZ}" : "";
+                    var first = wg.First();
+                    var workerId = nextId++;
+                    var workerTasks = wg.OrderBy(e => e.StartTime).ToList();
+                    var workerStart = workerTasks.Min(e => e.StartTime);
+                    var workerEnd = workerTasks.Max(e => e.EndTime);
+                    var totalDur = workerTasks.Sum(e => e.DurationSec);
+                    var totalWeightKg = workerTasks.Sum(e => e.WeightKg) / 1000m;
 
-                    // Короткое имя для дерева
-                    var shortName = task.ProductName ?? task.ProductCode ?? "";
-                    if (shortName.Length > 25) shortName = shortName.Substring(0, 22) + "...";
-
-                    // Короткий текст на баре Ганта
-                    var barText = $"{weightKg:F1}кг";
-                    if (!string.IsNullOrEmpty(route)) barText = $"{route} {barText}";
-
-                    // Полный tooltip
-                    var tooltip = $"Тип: {task.TaskType}\n" +
-                        $"Товар: {task.ProductName} ({task.ProductCode})\n" +
-                        $"Вес: {weightKg:F1} кг, Кол-во: {task.Qty}\n" +
-                        $"Ячейки: {task.FromBin} → {task.ToBin}\n" +
-                        $"Время: {task.DurationSec:F0}с ({task.StartTime:HH:mm:ss} — {task.EndTime:HH:mm:ss})";
-                    if (task.BufferLevel > 0)
-                        tooltip += $"\nБуфер: {task.BufferLevel}";
-                    if (task.TransitionSec > 0)
-                        tooltip += $"\nПереход: {task.TransitionSec:F0}с";
-
+                    // Уровень 2: Работник
                     dt.Rows.Add(
-                        taskId,
                         workerId,
-                        shortName,
-                        typeChar,
-                        $"{weightKg:F1}",
-                        $"{task.DurationSec:F0}с",
-                        barText,
-                        task.StartTime,
-                        task.EndTime > task.StartTime ? task.EndTime : task.StartTime.AddSeconds(Math.Max(task.DurationSec, 1)),
+                        roleId,
+                        first.WorkerName ?? first.WorkerCode,
+                        "",
+                        $"{totalWeightKg:F0}",
+                        FormatDuration(totalDur),
+                        $"{workerTasks.Count} задач",
+                        workerStart,
+                        workerEnd,
                         100.0,
-                        tooltip
+                        ""
                     );
+
+                    // Уровень 3: Задачи
+                    foreach (var task in workerTasks)
+                    {
+                        var taskId = nextId++;
+                        var weightKg = task.WeightKg / 1000m;
+                        var typeChar = (task.TaskType ?? "").StartsWith("Repl") ? "R" : "D";
+                        var fromZ = string.IsNullOrEmpty(task.FromZone) || task.FromZone == "?" ? "" : task.FromZone;
+                        var toZ = string.IsNullOrEmpty(task.ToZone) || task.ToZone == "?" ? "" : task.ToZone;
+                        var route = (!string.IsNullOrEmpty(fromZ) && !string.IsNullOrEmpty(toZ))
+                            ? $"{fromZ}→{toZ}" : "";
+
+                        var shortName = task.ProductName ?? task.ProductCode ?? "";
+                        if (shortName.Length > 25) shortName = shortName.Substring(0, 22) + "...";
+
+                        var barText = $"{weightKg:F1}кг";
+                        if (!string.IsNullOrEmpty(route)) barText = $"{route} {barText}";
+
+                        dt.Rows.Add(
+                            taskId,
+                            workerId,
+                            shortName,
+                            typeChar,
+                            $"{weightKg:F1}",
+                            $"{task.DurationSec:F0}с",
+                            barText,
+                            task.StartTime,
+                            task.EndTime > task.StartTime ? task.EndTime : task.StartTime.AddSeconds(Math.Max(task.DurationSec, 1)),
+                            100.0,
+                            ""
+                        );
+                    }
                 }
             }
 
