@@ -260,6 +260,10 @@ public class WaveBacktestService
     /// </summary>
     public ActualTimeline CalculateActualTimeline(WaveTasksResponse data)
     {
+        // Определяем тип задачи по принадлежности к списку (не по PrevTaskRef — он может не приходить из 1С)
+        var distTaskRefs = new HashSet<string>(
+            data.DistributionTasks.Select(g => g.TaskRef).Where(r => !string.IsNullOrEmpty(r)));
+
         var allGroups = data.ReplenishmentTasks.Concat(data.DistributionTasks).ToList();
         var allActions = allGroups.SelectMany(g => g.Actions.Select(a => new { Group = g, Action = a })).ToList();
 
@@ -285,10 +289,8 @@ public class WaveBacktestService
                         dur = (a.CompletedAt.Value - a.StartedAt.Value).TotalSeconds;
                     if (dur < 0) dur = 0;
 
-                    // TaskType: PrevTaskRef пустой = Replenishment, иначе Distribution
-                    var taskType = string.IsNullOrEmpty(x.Group.PrevTaskRef)
-                        || x.Group.PrevTaskRef == "00000000-0000-0000-0000-000000000000"
-                        ? "Replenishment" : "Distribution";
+                    var taskType = distTaskRefs.Contains(x.Group.TaskRef)
+                        ? "Distribution" : "Replenishment";
 
                     return new ActionTiming
                     {
@@ -566,7 +568,13 @@ public class WaveBacktestService
 
         var workerNames = allAnnotated
             .GroupBy(a => a.OriginalWorkerCode)
-            .ToDictionary(g => g.Key, g => g.First().OriginalWorkerName);
+            .ToDictionary(g => g.Key, g =>
+            {
+                // Берём первое непустое имя (может отличаться между группами)
+                var name = g.Select(a => a.OriginalWorkerName)
+                    .FirstOrDefault(n => !string.IsNullOrWhiteSpace(n));
+                return name ?? g.Key; // fallback на код работника
+            });
 
         // === Кросс-дневная симуляция ===
         var replPool = new List<TaskGroupInfo>(replGroups); // отсортированы по Priority ↓
