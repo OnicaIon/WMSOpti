@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>WMS.BacktestViewer</RootNamespace>
+    <AssemblyName>WMS.BacktestViewer</AssemblyName>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Npgsql 4.1.x для .NET Framework 4.8 -->
+    <PackageReference Include="Npgsql" Version="4.1.13" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      DevExpress 21.2 — раскомментируйте после установки DevExpress через NuGet или GAC.
+      В VS: Tools → NuGet Package Manager → добавить DevExpress feed, затем:
+      Install-Package DevExpress.WindowsForms.GanttControl -Version 21.2.*
+    -->
+    <!--
+    <PackageReference Include="DevExpress.Win.Gantt" Version="21.2.*" />
+    -->
+  </ItemGroup>
+
+</Project>

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using WMS.BufferManagement.Domain.Entities;
@@ -119,25 +120,117 @@ public class WaveBacktestService
             "Время перехода: пикеры={PickerSec:F1}с ({PickerCount} работн.), форклифты={ForkSec:F1}с ({ForkCount} работн.)",
             pickerTransitionSec, pickerTransitions.Count, forkliftTransitionSec, forkliftTransitions.Count);
 
-        // 4. Кросс-дневная оптимизация с буфером
-        var (optimizedPlan, simulatedTimeline, dayBreakdowns) =
+        // 4. Создать контекст для сбора решений
+        var decisionCtx = new SimulationDecisionContext();
+
+        // Построить фактические events для Ганта из ActualTimeline
+        foreach (var wt in actualTimeline.WorkerTimelines)
+        {
+            foreach (var action in wt.Actions)
+            {
+                // Для факта — используем реальные timestamps действий
+                // Группируем по TaskGroupRef для палетного уровня
+                decisionCtx.ScheduleEvents.Add(new ScheduleEventRecord
+                {
+                    TimelineType = "fact",
+                    WorkerCode = wt.WorkerCode,
+                    WorkerName = wt.WorkerName,
+                    WorkerRole = wt.Role,
+                    TaskRef = action.TaskGroupRef,
+                    TaskType = action.TaskType,
+                    DayDate = action.DurationSec > 0 && wt.StartTime != default
+                        ? wt.StartTime.Date : DateTime.UtcNow.Date,
+                    StartTime = wt.StartTime, // Будет уточнено ниже
+                    EndTime = wt.EndTime,
+                    DurationSec = action.DurationSec,
+                    FromBin = action.FromBin,
+                    ToBin = action.ToBin,
+                    FromZone = action.FromZone,
+                    ToZone = action.ToZone,
+                    ProductCode = action.ProductCode,
+                    ProductName = action.ProductName,
+                    WeightKg = action.WeightKg,
+                    Qty = action.Qty,
+                    DurationSource = "actual"
+                });
+            }
+        }
+
+        // Сгруппировать фактические events по палетам (TaskGroupRef + Worker)
+        // чтобы получить 1 строку на палету (а не на action)
+        var factEventsByPallet = decisionCtx.ScheduleEvents
+            .Where(e => e.TimelineType == "fact" && !string.IsNullOrEmpty(e.TaskRef))
+            .GroupBy(e => new { e.TaskRef, e.WorkerCode })
+            .Select(g =>
+            {
+                var first = g.First();
+                return new ScheduleEventRecord
+                {
+                    TimelineType = "fact",
+                    WorkerCode = first.WorkerCode,
+                    WorkerName = first.WorkerName,
+                    WorkerRole = first.WorkerRole,
+                    TaskRef = first.TaskRef,
+                    TaskType = first.TaskType,
+                    DayDate = first.DayDate,
+                    StartTime = first.StartTime,
+                    EndTime = first.EndTime,
+                    DurationSec = g.Sum(e => e.DurationSec),
+                    FromBin = first.FromBin,
+                    ToBin = first.ToBin,
+                    FromZone = first.FromZone,
+                    ToZone = first.ToZone,
+                    ProductCode = first.ProductCode,
+                    ProductName = first.ProductName,
+                    WeightKg = g.Sum(e => e.WeightKg),
+                    Qty = g.Sum(e => e.Qty),
+                    DurationSource = "actual"
+                };
+            }).ToList();
+
+        // Заменить per-action events на per-pallet events
+        decisionCtx.ScheduleEvents.RemoveAll(e => e.TimelineType == "fact");
+        decisionCtx.ScheduleEvents.AddRange(factEventsByPallet);
+
+        // Уточнить timestamps из оригинальных данных волны
+        var allWaveGroups = waveData.ReplenishmentTasks.Concat(waveData.DistributionTasks)
+            .GroupBy(g => g.TaskRef).ToDictionary(g => g.Key, g => g.First());
+        foreach (var evt in decisionCtx.ScheduleEvents.Where(e => e.TimelineType == "fact"))
+        {
+            if (evt.TaskRef != null && allWaveGroups.TryGetValue(evt.TaskRef, out var grp))
+            {
+                var starts = grp.Actions.Where(a => a.StartedAt.HasValue).Select(a => a.StartedAt!.Value).ToList();
+                var ends = grp.Actions.Where(a => a.CompletedAt.HasValue).Select(a => a.CompletedAt!.Value).ToList();
+                if (starts.Any()) evt.StartTime = starts.Min();
+                if (ends.Any()) evt.EndTime = ends.Max();
+                if (starts.Any()) evt.DayDate = starts.Min().Date;
+            }
+        }
+
+        // 5. Кросс-дневная оптимизация с буфером (с контекстом решений)
+        var (optimizedPlan, simulatedTimeline, dayBreakdowns, priorityByRef) =
             OptimizeCrossDay(waveData, actualTimeline, routeStats, pickerStats,
-                pickerTransitionSec, forkliftTransitionSec);
+                pickerTransitionSec, forkliftTransitionSec, decisionCtx);
 
         var optDays = dayBreakdowns.Count(d => d.OptimizedReplGroups + d.OptimizedDistGroups > 0);
         var origDays = dayBreakdowns.Count(d => d.OriginalReplGroups + d.OriginalDistGroups > 0);
         _logger.LogInformation("Кросс-дневная оптимизация: {OptDays}/{OrigDays} дней, буфер {Cap}",
             optDays, origDays, _bufferCapacity);
+        _logger.LogInformation("Собрано: {Events} events, {Decisions} решений",
+            decisionCtx.ScheduleEvents.Count, decisionCtx.Decisions.Count);
 
-        // 5. Собрать результат
+        // 6. Собрать результат
         var result = BuildResult(waveData, actualTimeline, simulatedTimeline,
-            optimizedPlan, dayBreakdowns);
+            optimizedPlan, dayBreakdowns, priorityByRef);
 
         // Заполнить поля переходов
         result.PickerTransitionSec = pickerTransitionSec;
         result.ForkliftTransitionSec = forkliftTransitionSec;
         result.PickerTransitionCount = pickerTransitions.Sum(t => t.TransitionCount);
         result.ForkliftTransitionCount = forkliftTransitions.Sum(t => t.TransitionCount);
+
+        // Привязать контекст решений к результату
+        result.DecisionContext = decisionCtx;
 
         return result;
     }
@@ -301,14 +394,16 @@ public class WaveBacktestService
     /// Кросс-дневная оптимизация: все палеты = пул, работники ограничены днём,
     /// буфер ≤ capacity. Каждый день заполняется из пула до исчерпания capacity.
     /// </summary>
-    private (OptimizedPlan plan, SimulatedTimeline simulated, List<DayBreakdown> dayBreakdowns)
+    private (OptimizedPlan plan, SimulatedTimeline simulated, List<DayBreakdown> dayBreakdowns,
+             Dictionary<string, double> priorityByRef)
         OptimizeCrossDay(
             WaveTasksResponse waveData,
             ActualTimeline actualTimeline,
             List<RouteStatistics> routeStats,
             List<PickerProductStats> pickerStats,
             double pickerTransitionSec,
-            double forkliftTransitionSec)
+            double forkliftTransitionSec,
+            SimulationDecisionContext? decisionCtx = null)
     {
         var allAnnotated = BuildAnnotatedActions(waveData);
 
@@ -413,6 +508,10 @@ public class WaveBacktestService
             return tgi;
         }).ToList();
 
+        // Словарь приоритетов для TaskDetail
+        var priorityByRef = replGroups.Concat(distGroups)
+            .ToDictionary(g => g.TaskGroupRef, g => g.Priority);
+
         // === Worker-day capacity (по TaskType, не TemplateCode) ===
         var forkliftDayData = allAnnotated
             .Where(a => a.TaskType == "Replenishment")
@@ -485,7 +584,8 @@ public class WaveBacktestService
                     replPool, distPool, completedRepl,
                     dayForklifts, dayPickers,
                     ref bufferLevel, _bufferCapacity,
-                    forkliftTransitionSec, pickerTransitionSec);
+                    forkliftTransitionSec, pickerTransitionSec,
+                    day, decisionCtx, workerNames);
 
                 // Merge assignments
                 foreach (var (wc, actions) in dayAssignments)
@@ -587,7 +687,7 @@ public class WaveBacktestService
             dayBreakdowns.Where(d => d.OptimizedReplGroups + d.OptimizedDistGroups > 0)
                 .Sum(d => d.OptimizedMakespan.TotalSeconds));
 
-        return (mergedPlan, simTimeline, dayBreakdowns);
+        return (mergedPlan, simTimeline, dayBreakdowns, priorityByRef);
     }
 
     /// <summary>
@@ -604,7 +704,10 @@ public class WaveBacktestService
             ref int bufferLevel,
             int bufferCapacity,
             double forkliftTransitionSec,
-            double pickerTransitionSec)
+            double pickerTransitionSec,
+            DateTime day = default,
+            SimulationDecisionContext? decisionCtx = null,
+            Dictionary<string, string>? workerNames = null)
     {
         var assignments = new Dictionary<string, List<ActionTiming>>();
         var forkliftLoad = forkliftCapacity.Keys.ToDictionary(k => k, _ => 0.0);
@@ -613,6 +716,10 @@ public class WaveBacktestService
         var pickerTaskCount = pickerCapacity.Keys.ToDictionary(k => k, _ => 0);
         var forkliftRemaining = new Dictionary<string, double>(forkliftCapacity);
         var pickerRemaining = new Dictionary<string, double>(pickerCapacity);
+
+        // Per-worker time offset для Ганта (секунды от начала дня)
+        var workerTimeOffset = forkliftCapacity.Keys.Concat(pickerCapacity.Keys)
+            .ToDictionary(k => k, _ => 0.0);
 
         int replDone = 0, distDone = 0;
         const double tolerance = 1.0;
@@ -662,6 +769,71 @@ public class WaveBacktestService
                     foreach (var aa in bestRepl.Actions)
                         assignments[bestForklift].Add(CreateActionTiming(aa, bestForklift));
 
+                    // --- Сбор данных для БД ---
+                    if (decisionCtx != null)
+                    {
+                        var altForklifts = forkliftRemaining
+                            .Where(kv => kv.Key != bestForklift)
+                            .OrderByDescending(kv => kv.Value).Take(3)
+                            .Select(kv => new { code = kv.Key, remaining = Math.Round(kv.Value, 1),
+                                load = Math.Round(forkliftLoad[kv.Key], 1), tasks = forkliftTaskCount[kv.Key] });
+                        var altRepls = replPool.Take(3)
+                            .Select(r => new { ref_ = r.TaskGroupRef, priority = Math.Round(r.Priority, 0),
+                                duration = Math.Round(r.DurationSec, 1), weight = Math.Round(r.WeightKg, 1) });
+
+                        decisionCtx.Decisions.Add(new DecisionLogRecord
+                        {
+                            DecisionSeq = ++decisionCtx.DecisionCounter,
+                            DayDate = day,
+                            DecisionType = "assign_repl",
+                            TaskRef = bestRepl.TaskGroupRef,
+                            TaskType = "Replenishment",
+                            ChosenWorkerCode = bestForklift,
+                            ChosenWorkerRemainingSec = forkliftRemaining[bestForklift],
+                            ChosenTaskPriority = bestRepl.Priority,
+                            ChosenTaskDurationSec = bestRepl.DurationSec,
+                            ChosenTaskWeightKg = (decimal)bestRepl.WeightKg,
+                            BufferLevelBefore = bufferLevel - 1,
+                            BufferLevelAfter = bufferLevel,
+                            BufferCapacity = bufferCapacity,
+                            AltWorkersJson = JsonSerializer.Serialize(altForklifts),
+                            AltTasksJson = JsonSerializer.Serialize(altRepls),
+                            ActiveConstraint = "none",
+                            ReasonText = $"Палета приоритет={bestRepl.Priority:F0}, вес={bestRepl.WeightKg:F1}кг → форклифт {bestForklift} (остаток {forkliftRemaining[bestForklift]:F0}с)"
+                        });
+
+                        // Событие Ганта (optimized)
+                        var startOffset = workerTimeOffset[bestForklift] + fkTransition;
+                        var endOffset = startOffset + bestRepl.DurationSec;
+                        workerTimeOffset[bestForklift] = endOffset;
+                        var firstAction = bestRepl.Actions.FirstOrDefault();
+
+                        decisionCtx.ScheduleEvents.Add(new ScheduleEventRecord
+                        {
+                            TimelineType = "optimized",
+                            WorkerCode = bestForklift,
+                            WorkerName = workerNames?.GetValueOrDefault(bestForklift),
+                            WorkerRole = "Forklift",
+                            TaskRef = bestRepl.TaskGroupRef,
+                            TaskType = "Replenishment",
+                            DayDate = day,
+                            StartTime = day.Date.AddSeconds(startOffset),
+                            EndTime = day.Date.AddSeconds(endOffset),
+                            DurationSec = bestRepl.DurationSec,
+                            FromBin = firstAction?.Action.StorageBin,
+                            ToBin = firstAction?.Action.AllocationBin,
+                            FromZone = firstAction != null ? ExtractZone(firstAction.Action.StorageBin) : null,
+                            ToZone = firstAction != null ? ExtractZone(firstAction.Action.AllocationBin) : null,
+                            ProductCode = firstAction?.Action.ProductCode,
+                            ProductName = firstAction?.Action.ProductName,
+                            WeightKg = bestRepl.Actions.Sum(a => a.Action.WeightKg),
+                            Qty = bestRepl.Actions.Sum(a => a.Action.QtyPlan > 0 ? a.Action.QtyPlan : 1),
+                            SequenceNumber = ++decisionCtx.SequenceCounter,
+                            BufferLevel = bufferLevel,
+                            TransitionSec = fkTransition
+                        });
+                    }
+
                     progress = true;
                 }
             }
@@ -699,9 +871,113 @@ public class WaveBacktestService
                         foreach (var aa in readyDist.Actions)
                             assignments[bestPicker].Add(CreateActionTiming(aa, bestPicker));
 
+                        // --- Сбор данных для БД ---
+                        if (decisionCtx != null)
+                        {
+                            var altPickers = pickerRemaining
+                                .Where(kv => kv.Key != bestPicker)
+                                .OrderBy(kv => pickerFinishTime[kv.Key]).Take(3)
+                                .Select(kv => new { code = kv.Key, remaining = Math.Round(kv.Value, 1),
+                                    load = Math.Round(pickerFinishTime[kv.Key], 1), tasks = pickerTaskCount[kv.Key] });
+                            var altDists = distPool
+                                .Where(d => string.IsNullOrEmpty(d.PrevTaskRef) || completedRepl.Contains(d.PrevTaskRef))
+                                .Take(3)
+                                .Select(d => new { ref_ = d.TaskGroupRef, priority = Math.Round(d.Priority, 0),
+                                    duration = Math.Round(d.DurationSec, 1), weight = Math.Round(d.WeightKg, 1) });
+
+                            decisionCtx.Decisions.Add(new DecisionLogRecord
+                            {
+                                DecisionSeq = ++decisionCtx.DecisionCounter,
+                                DayDate = day,
+                                DecisionType = "assign_dist",
+                                TaskRef = readyDist.TaskGroupRef,
+                                TaskType = "Distribution",
+                                ChosenWorkerCode = bestPicker,
+                                ChosenWorkerRemainingSec = pickerRemaining[bestPicker],
+                                ChosenTaskPriority = readyDist.Priority,
+                                ChosenTaskDurationSec = readyDist.DurationSec,
+                                ChosenTaskWeightKg = (decimal)readyDist.WeightKg,
+                                BufferLevelBefore = bufferLevel + 1,
+                                BufferLevelAfter = bufferLevel,
+                                BufferCapacity = bufferCapacity,
+                                AltWorkersJson = JsonSerializer.Serialize(altPickers),
+                                AltTasksJson = JsonSerializer.Serialize(altDists),
+                                ActiveConstraint = "none",
+                                ReasonText = $"Палета приоритет={readyDist.Priority:F0}, вес={readyDist.WeightKg:F1}кг → пикер {bestPicker} (финиш {pickerFinishTime[bestPicker]:F0}с)"
+                            });
+
+                            // Событие Ганта (optimized)
+                            var startOffset = workerTimeOffset[bestPicker] + pkTransition;
+                            var endOffset = startOffset + readyDist.DurationSec;
+                            workerTimeOffset[bestPicker] = endOffset;
+                            var firstAction = readyDist.Actions.FirstOrDefault();
+
+                            decisionCtx.ScheduleEvents.Add(new ScheduleEventRecord
+                            {
+                                TimelineType = "optimized",
+                                WorkerCode = bestPicker,
+                                WorkerName = workerNames?.GetValueOrDefault(bestPicker),
+                                WorkerRole = "Picker",
+                                TaskRef = readyDist.TaskGroupRef,
+                                TaskType = "Distribution",
+                                DayDate = day,
+                                StartTime = day.Date.AddSeconds(startOffset),
+                                EndTime = day.Date.AddSeconds(endOffset),
+                                DurationSec = readyDist.DurationSec,
+                                FromBin = firstAction?.Action.StorageBin,
+                                ToBin = firstAction?.Action.AllocationBin,
+                                FromZone = firstAction != null ? ExtractZone(firstAction.Action.StorageBin) : null,
+                                ToZone = firstAction != null ? ExtractZone(firstAction.Action.AllocationBin) : null,
+                                ProductCode = firstAction?.Action.ProductCode,
+                                ProductName = firstAction?.Action.ProductName,
+                                WeightKg = readyDist.Actions.Sum(a => a.Action.WeightKg),
+                                Qty = readyDist.Actions.Sum(a => a.Action.QtyPlan > 0 ? a.Action.QtyPlan : 1),
+                                SequenceNumber = ++decisionCtx.SequenceCounter,
+                                BufferLevel = bufferLevel,
+                                TransitionSec = pkTransition
+                            });
+                        }
+
                         progress = true;
                     }
                 }
+            }
+        }
+
+        // --- Записать skip-решения при остатке задач ---
+        if (decisionCtx != null)
+        {
+            if (replPool.Any())
+            {
+                var constraint = bufferLevel >= bufferCapacity ? "buffer_full" : "no_capacity";
+                decisionCtx.Decisions.Add(new DecisionLogRecord
+                {
+                    DecisionSeq = ++decisionCtx.DecisionCounter,
+                    DayDate = day,
+                    DecisionType = "skip_repl",
+                    ActiveConstraint = constraint,
+                    BufferLevelBefore = bufferLevel,
+                    BufferLevelAfter = bufferLevel,
+                    BufferCapacity = bufferCapacity,
+                    ReasonText = $"День {day:dd.MM}: {replPool.Count} repl не назначены ({constraint})"
+                });
+            }
+            if (distPool.Any())
+            {
+                var readyCount = distPool.Count(d => string.IsNullOrEmpty(d.PrevTaskRef) || completedRepl.Contains(d.PrevTaskRef));
+                var constraint = bufferLevel <= 0 ? "buffer_empty"
+                    : readyCount == 0 ? "no_ready_dist" : "no_capacity";
+                decisionCtx.Decisions.Add(new DecisionLogRecord
+                {
+                    DecisionSeq = ++decisionCtx.DecisionCounter,
+                    DayDate = day,
+                    DecisionType = "skip_dist",
+                    ActiveConstraint = constraint,
+                    BufferLevelBefore = bufferLevel,
+                    BufferLevelAfter = bufferLevel,
+                    BufferCapacity = bufferCapacity,
+                    ReasonText = $"День {day:dd.MM}: {distPool.Count} dist не назначены ({constraint}, готово={readyCount})"
+                });
             }
         }
 
@@ -769,7 +1045,8 @@ public class WaveBacktestService
         ActualTimeline actual,
         SimulatedTimeline simulated,
         OptimizedPlan plan,
-        List<DayBreakdown> dayBreakdowns)
+        List<DayBreakdown> dayBreakdowns,
+        Dictionary<string, double>? priorityByRef = null)
     {
         // Итоговое сравнение: сумма per-day active vs сумма per-day makespans
         var actualDuration = TimeSpan.FromSeconds(
@@ -872,7 +1149,8 @@ public class WaveBacktestService
                     ActualDurationSec = groupDuration,
                     OptimizedDurationSec = optDurationByRef.GetValueOrDefault(grp.Key,
                         groupDuration ?? DefaultRouteDurationSec),
-                    OptimizedWorkerCode = optWorkerByRef.GetValueOrDefault(grp.Key)
+                    OptimizedWorkerCode = optWorkerByRef.GetValueOrDefault(grp.Key),
+                    PriorityScore = priorityByRef?.GetValueOrDefault(grp.Key) ?? 0
                 };
             }).ToList();
 
@@ -912,6 +1190,37 @@ public class WaveBacktestService
             .OrderBy(d => d.StartedAt ?? DateTime.MaxValue)
             .ThenBy(d => d.TaskType)
             .ToList();
+
+        // Заполнить DurationSource для TaskDetails из SimulatedAction
+        // (берём преобладающий source для actions в каждой группе)
+        var durationSourceByRef = simulated.WorkerTimelines
+            .SelectMany(w => w.Actions.Select(a => new { w.WorkerCode, a.FromBin, a.DurationSource }))
+            .Where(a => !string.IsNullOrEmpty(a.DurationSource))
+            .GroupBy(a => a.FromBin) // группируем по FromBin как proxy для TaskRef
+            .ToDictionary(g => g.Key, g => g.First().DurationSource);
+
+        // Более точный маппинг: по WorkerCode + TaskGroupRef из plan assignments
+        var sourceByTaskRef = new Dictionary<string, string>();
+        foreach (var (wc, actions) in plan.WorkerAssignments)
+        {
+            var simActions = simulated.WorkerTimelines
+                .FirstOrDefault(w => w.WorkerCode == wc)?.Actions ?? new List<SimulatedAction>();
+            // Индексируем по FromBin для соответствия
+            var actionIndex = 0;
+            foreach (var pa in actions)
+            {
+                if (actionIndex < simActions.Count && !string.IsNullOrEmpty(pa.TaskGroupRef))
+                {
+                    sourceByTaskRef.TryAdd(pa.TaskGroupRef, simActions[actionIndex].DurationSource);
+                }
+                actionIndex++;
+            }
+        }
+        foreach (var td in taskDetails)
+        {
+            if (sourceByTaskRef.TryGetValue(td.TaskRef, out var src))
+                td.DurationSource = src;
+        }
 
         // Подсчёт источников оценки
         var allSimActions = simulated.WorkerTimelines.SelectMany(w => w.Actions).ToList();

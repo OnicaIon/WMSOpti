@@ -314,6 +314,177 @@ public class TimescaleDbRepository : IHistoricalRepository, IAsyncDisposable
         await SetupRetentionPolicy(conn, "picker_metrics", cancellationToken);
         await SetupRetentionPolicy(conn, "buffer_snapshots", cancellationToken);
 
+        // ================================================================
+        // Таблицы для результатов бэктеста (Ганта, лог решений)
+        // ================================================================
+
+        await ExecuteNonQueryAsync(conn, @"
+            CREATE TABLE IF NOT EXISTS backtest_runs (
+                id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                wave_number                 VARCHAR(50) NOT NULL UNIQUE,
+                wave_date                   TIMESTAMPTZ NOT NULL,
+                wave_status                 VARCHAR(50),
+                analyzed_at                 TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                total_repl_tasks            INT NOT NULL DEFAULT 0,
+                total_dist_tasks            INT NOT NULL DEFAULT 0,
+                total_actions               INT NOT NULL DEFAULT 0,
+                unique_workers              INT NOT NULL DEFAULT 0,
+                total_repl_groups           INT NOT NULL DEFAULT 0,
+                total_dist_groups           INT NOT NULL DEFAULT 0,
+                actual_start_time           TIMESTAMPTZ,
+                actual_end_time             TIMESTAMPTZ,
+                actual_wallclock_sec        DECIMAL(12,2),
+                actual_active_sec           DECIMAL(12,2),
+                optimized_duration_sec      DECIMAL(12,2),
+                improvement_pct             DECIMAL(6,2),
+                improvement_sec             DECIMAL(12,2),
+                optimizer_is_optimal        BOOLEAN,
+                original_wave_days          INT,
+                optimized_wave_days         INT,
+                days_saved                  INT,
+                buffer_capacity             INT,
+                picker_transition_sec       DECIMAL(8,2),
+                forklift_transition_sec     DECIMAL(8,2),
+                picker_transition_count     INT,
+                forklift_transition_count   INT,
+                actual_durations_used       INT,
+                route_stats_used            INT,
+                picker_stats_used           INT,
+                default_estimates_used      INT,
+                wave_mean_duration_sec      DECIMAL(10,2)
+            );", cancellationToken);
+
+        await ExecuteNonQueryAsync(conn, @"
+            CREATE TABLE IF NOT EXISTS backtest_day_breakdowns (
+                id                          BIGSERIAL PRIMARY KEY,
+                run_id                      UUID NOT NULL REFERENCES backtest_runs(id) ON DELETE CASCADE,
+                day_date                    DATE NOT NULL,
+                workers                     INT,
+                forklift_workers            INT,
+                picker_workers              INT,
+                repl_actions                INT,
+                dist_actions                INT,
+                total_actions               INT,
+                actual_active_sec           DECIMAL(12,2),
+                optimized_makespan_sec      DECIMAL(12,2),
+                improvement_pct             DECIMAL(6,2),
+                original_repl_groups        INT,
+                original_dist_groups        INT,
+                optimized_repl_groups       INT,
+                optimized_dist_groups       INT,
+                additional_pallets          INT,
+                buffer_level_start          INT,
+                buffer_level_end            INT
+            );
+            CREATE INDEX IF NOT EXISTS idx_backtest_days_run ON backtest_day_breakdowns (run_id);
+            ", cancellationToken);
+
+        await ExecuteNonQueryAsync(conn, @"
+            CREATE TABLE IF NOT EXISTS backtest_worker_breakdowns (
+                id                          BIGSERIAL PRIMARY KEY,
+                run_id                      UUID NOT NULL REFERENCES backtest_runs(id) ON DELETE CASCADE,
+                worker_code                 VARCHAR(50) NOT NULL,
+                worker_name                 VARCHAR(200),
+                role                        VARCHAR(20),
+                actual_tasks                INT,
+                optimized_tasks             INT,
+                actual_duration_sec         DECIMAL(12,2),
+                optimized_duration_sec      DECIMAL(12,2),
+                improvement_pct             DECIMAL(6,2)
+            );
+            CREATE INDEX IF NOT EXISTS idx_backtest_workers_run ON backtest_worker_breakdowns (run_id);
+            ", cancellationToken);
+
+        await ExecuteNonQueryAsync(conn, @"
+            CREATE TABLE IF NOT EXISTS backtest_task_details (
+                id                          BIGSERIAL PRIMARY KEY,
+                run_id                      UUID NOT NULL REFERENCES backtest_runs(id) ON DELETE CASCADE,
+                task_number                 VARCHAR(50),
+                task_ref                    VARCHAR(100),
+                prev_task_ref               VARCHAR(100),
+                worker_code                 VARCHAR(50),
+                worker_name                 VARCHAR(200),
+                task_type                   VARCHAR(20),
+                route                       VARCHAR(20),
+                from_bin                    VARCHAR(50),
+                to_bin                      VARCHAR(50),
+                action_count                INT,
+                total_weight_kg             DECIMAL(10,2),
+                total_qty                   INT,
+                started_at                  TIMESTAMPTZ,
+                completed_at               TIMESTAMPTZ,
+                actual_duration_sec         DECIMAL(10,2),
+                optimized_duration_sec      DECIMAL(10,2),
+                optimized_worker_code       VARCHAR(50),
+                linked_worker_code          VARCHAR(50),
+                linked_worker_name          VARCHAR(200),
+                linked_actual_duration_sec  DECIMAL(10,2),
+                linked_opt_worker_code      VARCHAR(50),
+                linked_opt_duration_sec     DECIMAL(10,2),
+                priority_score              DECIMAL(12,2),
+                duration_source             VARCHAR(30)
+            );
+            CREATE INDEX IF NOT EXISTS idx_backtest_tasks_run ON backtest_task_details (run_id);
+            CREATE INDEX IF NOT EXISTS idx_backtest_tasks_ref ON backtest_task_details (task_ref);
+            ", cancellationToken);
+
+        await ExecuteNonQueryAsync(conn, @"
+            CREATE TABLE IF NOT EXISTS backtest_schedule_events (
+                id                          BIGSERIAL PRIMARY KEY,
+                run_id                      UUID NOT NULL REFERENCES backtest_runs(id) ON DELETE CASCADE,
+                timeline_type               VARCHAR(10) NOT NULL,
+                worker_code                 VARCHAR(50) NOT NULL,
+                worker_name                 VARCHAR(200),
+                worker_role                 VARCHAR(20),
+                task_ref                    VARCHAR(100),
+                task_type                   VARCHAR(20),
+                day_date                    DATE,
+                start_time                  TIMESTAMPTZ,
+                end_time                    TIMESTAMPTZ,
+                duration_sec                DECIMAL(10,2),
+                from_bin                    VARCHAR(50),
+                to_bin                      VARCHAR(50),
+                from_zone                   VARCHAR(10),
+                to_zone                     VARCHAR(10),
+                product_code                VARCHAR(50),
+                product_name                VARCHAR(200),
+                weight_kg                   DECIMAL(10,2),
+                qty                         INT,
+                sequence_number             INT,
+                buffer_level                INT,
+                duration_source             VARCHAR(30),
+                transition_sec              DECIMAL(10,2)
+            );
+            CREATE INDEX IF NOT EXISTS idx_backtest_events_run ON backtest_schedule_events (run_id, timeline_type);
+            CREATE INDEX IF NOT EXISTS idx_backtest_events_worker ON backtest_schedule_events (run_id, worker_code);
+            CREATE INDEX IF NOT EXISTS idx_backtest_events_day ON backtest_schedule_events (run_id, day_date);
+            ", cancellationToken);
+
+        await ExecuteNonQueryAsync(conn, @"
+            CREATE TABLE IF NOT EXISTS backtest_decision_log (
+                id                              BIGSERIAL PRIMARY KEY,
+                run_id                          UUID NOT NULL REFERENCES backtest_runs(id) ON DELETE CASCADE,
+                decision_seq                    INT NOT NULL,
+                day_date                        DATE NOT NULL,
+                decision_type                   VARCHAR(20) NOT NULL,
+                task_ref                        VARCHAR(100),
+                task_type                       VARCHAR(20),
+                chosen_worker_code              VARCHAR(50),
+                chosen_worker_remaining_sec     DECIMAL(10,2),
+                chosen_task_priority            DECIMAL(12,2),
+                chosen_task_duration_sec        DECIMAL(10,2),
+                chosen_task_weight_kg           DECIMAL(10,2),
+                buffer_level_before             INT,
+                buffer_level_after              INT,
+                buffer_capacity                 INT,
+                alt_workers_json                JSONB,
+                alt_tasks_json                  JSONB,
+                active_constraint               VARCHAR(50),
+                reason_text                     TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_backtest_decisions_run ON backtest_decision_log (run_id, decision_seq);
+            ", cancellationToken);
+
         _logger.LogInformation("TimescaleDB schema initialized successfully");
     }
 
@@ -1807,6 +1978,475 @@ public class TimescaleDbRepository : IHistoricalRepository, IAsyncDisposable
             WHERE z.is_buffer = TRUE AND c.is_active = TRUE;", conn);
         var result = await cmd.ExecuteScalarAsync(ct);
         return result is int count ? count : 0;
+    }
+
+    // ========================================================================
+    // Backtest Persistence
+    // ========================================================================
+
+    public async Task<Guid> SaveBacktestResultAsync(
+        Services.Backtesting.BacktestResult result,
+        Services.Backtesting.SimulationDecisionContext decisions,
+        CancellationToken cancellationToken = default)
+    {
+        await using var conn = await OpenConnectionAsync(cancellationToken);
+        await using var tx = await conn.BeginTransactionAsync(cancellationToken);
+
+        try
+        {
+            // 1. Удалить старые данные для этой волны (CASCADE удалит дочерние)
+            await using (var delCmd = new NpgsqlCommand(
+                "DELETE FROM backtest_runs WHERE wave_number = @wn", conn, tx))
+            {
+                delCmd.Parameters.AddWithValue("wn", result.WaveNumber);
+                await delCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // 2. INSERT backtest_runs
+            var runId = Guid.NewGuid();
+            await using (var cmd = new NpgsqlCommand(@"
+                INSERT INTO backtest_runs (
+                    id, wave_number, wave_date, wave_status, analyzed_at,
+                    total_repl_tasks, total_dist_tasks, total_actions, unique_workers,
+                    total_repl_groups, total_dist_groups,
+                    actual_start_time, actual_end_time, actual_wallclock_sec, actual_active_sec,
+                    optimized_duration_sec, improvement_pct, improvement_sec, optimizer_is_optimal,
+                    original_wave_days, optimized_wave_days, days_saved, buffer_capacity,
+                    picker_transition_sec, forklift_transition_sec,
+                    picker_transition_count, forklift_transition_count,
+                    actual_durations_used, route_stats_used, picker_stats_used, default_estimates_used,
+                    wave_mean_duration_sec
+                ) VALUES (
+                    @id, @wave_number, @wave_date, @wave_status, @analyzed_at,
+                    @total_repl_tasks, @total_dist_tasks, @total_actions, @unique_workers,
+                    @total_repl_groups, @total_dist_groups,
+                    @actual_start_time, @actual_end_time, @actual_wallclock_sec, @actual_active_sec,
+                    @optimized_duration_sec, @improvement_pct, @improvement_sec, @optimizer_is_optimal,
+                    @original_wave_days, @optimized_wave_days, @days_saved, @buffer_capacity,
+                    @picker_transition_sec, @forklift_transition_sec,
+                    @picker_transition_count, @forklift_transition_count,
+                    @actual_durations_used, @route_stats_used, @picker_stats_used, @default_estimates_used,
+                    @wave_mean_duration_sec
+                )", conn, tx))
+            {
+                cmd.Parameters.AddWithValue("id", runId);
+                cmd.Parameters.AddWithValue("wave_number", result.WaveNumber);
+                cmd.Parameters.AddWithValue("wave_date", result.WaveDate.ToUniversalTime());
+                cmd.Parameters.AddWithValue("wave_status", (object?)result.WaveStatus ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("analyzed_at", result.AnalyzedAt.ToUniversalTime());
+                cmd.Parameters.AddWithValue("total_repl_tasks", result.TotalReplenishmentTasks);
+                cmd.Parameters.AddWithValue("total_dist_tasks", result.TotalDistributionTasks);
+                cmd.Parameters.AddWithValue("total_actions", result.TotalActions);
+                cmd.Parameters.AddWithValue("unique_workers", result.UniqueWorkers);
+                cmd.Parameters.AddWithValue("total_repl_groups", result.TotalReplGroups);
+                cmd.Parameters.AddWithValue("total_dist_groups", result.TotalDistGroups);
+                cmd.Parameters.AddWithValue("actual_start_time", result.ActualStartTime.ToUniversalTime());
+                cmd.Parameters.AddWithValue("actual_end_time", result.ActualEndTime.ToUniversalTime());
+                cmd.Parameters.AddWithValue("actual_wallclock_sec", (decimal)result.ActualWallClockDuration.TotalSeconds);
+                cmd.Parameters.AddWithValue("actual_active_sec", (decimal)result.ActualActiveDuration.TotalSeconds);
+                cmd.Parameters.AddWithValue("optimized_duration_sec", (decimal)result.OptimizedDuration.TotalSeconds);
+                cmd.Parameters.AddWithValue("improvement_pct", (decimal)result.ImprovementPercent);
+                cmd.Parameters.AddWithValue("improvement_sec", (decimal)result.ImprovementTime.TotalSeconds);
+                cmd.Parameters.AddWithValue("optimizer_is_optimal", result.OptimizerIsOptimal);
+                cmd.Parameters.AddWithValue("original_wave_days", result.OriginalWaveDays);
+                cmd.Parameters.AddWithValue("optimized_wave_days", result.OptimizedWaveDays);
+                cmd.Parameters.AddWithValue("days_saved", result.DaysSaved);
+                cmd.Parameters.AddWithValue("buffer_capacity", result.BufferCapacity);
+                cmd.Parameters.AddWithValue("picker_transition_sec", (decimal)result.PickerTransitionSec);
+                cmd.Parameters.AddWithValue("forklift_transition_sec", (decimal)result.ForkliftTransitionSec);
+                cmd.Parameters.AddWithValue("picker_transition_count", result.PickerTransitionCount);
+                cmd.Parameters.AddWithValue("forklift_transition_count", result.ForkliftTransitionCount);
+                cmd.Parameters.AddWithValue("actual_durations_used", result.ActualDurationsUsed);
+                cmd.Parameters.AddWithValue("route_stats_used", result.RouteStatsUsed);
+                cmd.Parameters.AddWithValue("picker_stats_used", result.PickerStatsUsed);
+                cmd.Parameters.AddWithValue("default_estimates_used", result.DefaultEstimatesUsed);
+                cmd.Parameters.AddWithValue("wave_mean_duration_sec", (decimal)result.WaveMeanDurationSec);
+                await cmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // 3. Batch INSERT backtest_day_breakdowns
+            if (result.DayBreakdowns.Any())
+            {
+                await using var batch = new NpgsqlBatch(conn, tx);
+                foreach (var d in result.DayBreakdowns)
+                {
+                    var cmd = new NpgsqlBatchCommand(@"
+                        INSERT INTO backtest_day_breakdowns (
+                            run_id, day_date, workers, forklift_workers, picker_workers,
+                            repl_actions, dist_actions, total_actions,
+                            actual_active_sec, optimized_makespan_sec, improvement_pct,
+                            original_repl_groups, original_dist_groups,
+                            optimized_repl_groups, optimized_dist_groups, additional_pallets,
+                            buffer_level_start, buffer_level_end
+                        ) VALUES (
+                            @run_id, @day_date, @workers, @forklift_workers, @picker_workers,
+                            @repl_actions, @dist_actions, @total_actions,
+                            @actual_active_sec, @optimized_makespan_sec, @improvement_pct,
+                            @original_repl_groups, @original_dist_groups,
+                            @optimized_repl_groups, @optimized_dist_groups, @additional_pallets,
+                            @buffer_level_start, @buffer_level_end
+                        )");
+                    cmd.Parameters.AddWithValue("run_id", runId);
+                    cmd.Parameters.AddWithValue("day_date", d.Date.Date);
+                    cmd.Parameters.AddWithValue("workers", d.Workers);
+                    cmd.Parameters.AddWithValue("forklift_workers", d.ForkliftWorkers);
+                    cmd.Parameters.AddWithValue("picker_workers", d.PickerWorkers);
+                    cmd.Parameters.AddWithValue("repl_actions", d.ReplActions);
+                    cmd.Parameters.AddWithValue("dist_actions", d.DistActions);
+                    cmd.Parameters.AddWithValue("total_actions", d.TotalActions);
+                    cmd.Parameters.AddWithValue("actual_active_sec", (decimal)d.ActualActiveDuration.TotalSeconds);
+                    cmd.Parameters.AddWithValue("optimized_makespan_sec", (decimal)d.OptimizedMakespan.TotalSeconds);
+                    cmd.Parameters.AddWithValue("improvement_pct", (decimal)d.ImprovementPercent);
+                    cmd.Parameters.AddWithValue("original_repl_groups", d.OriginalReplGroups);
+                    cmd.Parameters.AddWithValue("original_dist_groups", d.OriginalDistGroups);
+                    cmd.Parameters.AddWithValue("optimized_repl_groups", d.OptimizedReplGroups);
+                    cmd.Parameters.AddWithValue("optimized_dist_groups", d.OptimizedDistGroups);
+                    cmd.Parameters.AddWithValue("additional_pallets", d.AdditionalPallets);
+                    cmd.Parameters.AddWithValue("buffer_level_start", d.BufferLevelStart);
+                    cmd.Parameters.AddWithValue("buffer_level_end", d.BufferLevelEnd);
+                    batch.BatchCommands.Add(cmd);
+                }
+                await batch.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // 4. Batch INSERT backtest_worker_breakdowns
+            if (result.WorkerBreakdowns.Any())
+            {
+                await using var batch = new NpgsqlBatch(conn, tx);
+                foreach (var w in result.WorkerBreakdowns)
+                {
+                    var cmd = new NpgsqlBatchCommand(@"
+                        INSERT INTO backtest_worker_breakdowns (
+                            run_id, worker_code, worker_name, role,
+                            actual_tasks, optimized_tasks,
+                            actual_duration_sec, optimized_duration_sec, improvement_pct
+                        ) VALUES (
+                            @run_id, @worker_code, @worker_name, @role,
+                            @actual_tasks, @optimized_tasks,
+                            @actual_duration_sec, @optimized_duration_sec, @improvement_pct
+                        )");
+                    cmd.Parameters.AddWithValue("run_id", runId);
+                    cmd.Parameters.AddWithValue("worker_code", w.WorkerCode);
+                    cmd.Parameters.AddWithValue("worker_name", (object?)w.WorkerName ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("role", (object?)w.Role ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("actual_tasks", w.ActualTasks);
+                    cmd.Parameters.AddWithValue("optimized_tasks", w.OptimizedTasks);
+                    cmd.Parameters.AddWithValue("actual_duration_sec", (decimal)w.ActualDuration.TotalSeconds);
+                    cmd.Parameters.AddWithValue("optimized_duration_sec", (decimal)w.OptimizedDuration.TotalSeconds);
+                    cmd.Parameters.AddWithValue("improvement_pct", (decimal)w.ImprovementPercent);
+                    batch.BatchCommands.Add(cmd);
+                }
+                await batch.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // 5. Batch INSERT backtest_task_details
+            if (result.TaskDetails.Any())
+            {
+                await using var batch = new NpgsqlBatch(conn, tx);
+                foreach (var t in result.TaskDetails)
+                {
+                    var cmd = new NpgsqlBatchCommand(@"
+                        INSERT INTO backtest_task_details (
+                            run_id, task_number, task_ref, prev_task_ref,
+                            worker_code, worker_name, task_type, route,
+                            from_bin, to_bin, action_count, total_weight_kg, total_qty,
+                            started_at, completed_at, actual_duration_sec,
+                            optimized_duration_sec, optimized_worker_code,
+                            linked_worker_code, linked_worker_name,
+                            linked_actual_duration_sec, linked_opt_worker_code, linked_opt_duration_sec,
+                            priority_score, duration_source
+                        ) VALUES (
+                            @run_id, @task_number, @task_ref, @prev_task_ref,
+                            @worker_code, @worker_name, @task_type, @route,
+                            @from_bin, @to_bin, @action_count, @total_weight_kg, @total_qty,
+                            @started_at, @completed_at, @actual_duration_sec,
+                            @optimized_duration_sec, @optimized_worker_code,
+                            @linked_worker_code, @linked_worker_name,
+                            @linked_actual_duration_sec, @linked_opt_worker_code, @linked_opt_duration_sec,
+                            @priority_score, @duration_source
+                        )");
+                    cmd.Parameters.AddWithValue("run_id", runId);
+                    cmd.Parameters.AddWithValue("task_number", (object?)t.TaskNumber ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("task_ref", (object?)t.TaskRef ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("prev_task_ref", (object?)t.PrevTaskRef ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("worker_code", (object?)t.WorkerCode ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("worker_name", (object?)t.WorkerName ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("task_type", (object?)t.TaskType ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("route", (object?)t.Route ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("from_bin", (object?)t.FromBin ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("to_bin", (object?)t.ToBin ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("action_count", t.ActionCount);
+                    cmd.Parameters.AddWithValue("total_weight_kg", t.TotalWeightKg);
+                    cmd.Parameters.AddWithValue("total_qty", t.TotalQty);
+                    cmd.Parameters.AddWithValue("started_at", t.StartedAt.HasValue ? (object)t.StartedAt.Value.ToUniversalTime() : DBNull.Value);
+                    cmd.Parameters.AddWithValue("completed_at", t.CompletedAt.HasValue ? (object)t.CompletedAt.Value.ToUniversalTime() : DBNull.Value);
+                    cmd.Parameters.AddWithValue("actual_duration_sec", t.ActualDurationSec.HasValue ? (object)(decimal)t.ActualDurationSec.Value : DBNull.Value);
+                    cmd.Parameters.AddWithValue("optimized_duration_sec", (decimal)t.OptimizedDurationSec);
+                    cmd.Parameters.AddWithValue("optimized_worker_code", (object?)t.OptimizedWorkerCode ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("linked_worker_code", (object?)t.LinkedWorkerCode ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("linked_worker_name", (object?)t.LinkedWorkerName ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("linked_actual_duration_sec", t.LinkedActualDurationSec.HasValue ? (object)(decimal)t.LinkedActualDurationSec.Value : DBNull.Value);
+                    cmd.Parameters.AddWithValue("linked_opt_worker_code", (object?)t.LinkedOptWorkerCode ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("linked_opt_duration_sec", t.LinkedOptDurationSec.HasValue ? (object)(decimal)t.LinkedOptDurationSec.Value : DBNull.Value);
+                    cmd.Parameters.AddWithValue("priority_score", (decimal)t.PriorityScore);
+                    cmd.Parameters.AddWithValue("duration_source", (object?)t.DurationSource ?? DBNull.Value);
+                    batch.BatchCommands.Add(cmd);
+                }
+                await batch.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // 6. Batch INSERT backtest_schedule_events
+            if (decisions.ScheduleEvents.Any())
+            {
+                await using var batch = new NpgsqlBatch(conn, tx);
+                foreach (var e in decisions.ScheduleEvents)
+                {
+                    var cmd = new NpgsqlBatchCommand(@"
+                        INSERT INTO backtest_schedule_events (
+                            run_id, timeline_type, worker_code, worker_name, worker_role,
+                            task_ref, task_type, day_date,
+                            start_time, end_time, duration_sec,
+                            from_bin, to_bin, from_zone, to_zone,
+                            product_code, product_name, weight_kg, qty,
+                            sequence_number, buffer_level, duration_source, transition_sec
+                        ) VALUES (
+                            @run_id, @timeline_type, @worker_code, @worker_name, @worker_role,
+                            @task_ref, @task_type, @day_date,
+                            @start_time, @end_time, @duration_sec,
+                            @from_bin, @to_bin, @from_zone, @to_zone,
+                            @product_code, @product_name, @weight_kg, @qty,
+                            @sequence_number, @buffer_level, @duration_source, @transition_sec
+                        )");
+                    cmd.Parameters.AddWithValue("run_id", runId);
+                    cmd.Parameters.AddWithValue("timeline_type", e.TimelineType);
+                    cmd.Parameters.AddWithValue("worker_code", e.WorkerCode);
+                    cmd.Parameters.AddWithValue("worker_name", (object?)e.WorkerName ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("worker_role", (object?)e.WorkerRole ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("task_ref", (object?)e.TaskRef ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("task_type", (object?)e.TaskType ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("day_date", e.DayDate.Date);
+                    cmd.Parameters.AddWithValue("start_time", e.StartTime.ToUniversalTime());
+                    cmd.Parameters.AddWithValue("end_time", e.EndTime.ToUniversalTime());
+                    cmd.Parameters.AddWithValue("duration_sec", (decimal)e.DurationSec);
+                    cmd.Parameters.AddWithValue("from_bin", (object?)e.FromBin ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("to_bin", (object?)e.ToBin ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("from_zone", (object?)e.FromZone ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("to_zone", (object?)e.ToZone ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("product_code", (object?)e.ProductCode ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("product_name", (object?)e.ProductName ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("weight_kg", e.WeightKg);
+                    cmd.Parameters.AddWithValue("qty", e.Qty);
+                    cmd.Parameters.AddWithValue("sequence_number", e.SequenceNumber);
+                    cmd.Parameters.AddWithValue("buffer_level", e.BufferLevel);
+                    cmd.Parameters.AddWithValue("duration_source", (object?)e.DurationSource ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("transition_sec", (decimal)e.TransitionSec);
+                    batch.BatchCommands.Add(cmd);
+                }
+                await batch.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // 7. Batch INSERT backtest_decision_log
+            if (decisions.Decisions.Any())
+            {
+                await using var batch = new NpgsqlBatch(conn, tx);
+                foreach (var d in decisions.Decisions)
+                {
+                    var cmd = new NpgsqlBatchCommand(@"
+                        INSERT INTO backtest_decision_log (
+                            run_id, decision_seq, day_date, decision_type,
+                            task_ref, task_type, chosen_worker_code,
+                            chosen_worker_remaining_sec, chosen_task_priority,
+                            chosen_task_duration_sec, chosen_task_weight_kg,
+                            buffer_level_before, buffer_level_after, buffer_capacity,
+                            alt_workers_json, alt_tasks_json,
+                            active_constraint, reason_text
+                        ) VALUES (
+                            @run_id, @decision_seq, @day_date, @decision_type,
+                            @task_ref, @task_type, @chosen_worker_code,
+                            @chosen_worker_remaining_sec, @chosen_task_priority,
+                            @chosen_task_duration_sec, @chosen_task_weight_kg,
+                            @buffer_level_before, @buffer_level_after, @buffer_capacity,
+                            @alt_workers_json::jsonb, @alt_tasks_json::jsonb,
+                            @active_constraint, @reason_text
+                        )");
+                    cmd.Parameters.AddWithValue("run_id", runId);
+                    cmd.Parameters.AddWithValue("decision_seq", d.DecisionSeq);
+                    cmd.Parameters.AddWithValue("day_date", d.DayDate.Date);
+                    cmd.Parameters.AddWithValue("decision_type", d.DecisionType);
+                    cmd.Parameters.AddWithValue("task_ref", (object?)d.TaskRef ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("task_type", (object?)d.TaskType ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("chosen_worker_code", (object?)d.ChosenWorkerCode ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("chosen_worker_remaining_sec", (decimal)d.ChosenWorkerRemainingSec);
+                    cmd.Parameters.AddWithValue("chosen_task_priority", (decimal)d.ChosenTaskPriority);
+                    cmd.Parameters.AddWithValue("chosen_task_duration_sec", (decimal)d.ChosenTaskDurationSec);
+                    cmd.Parameters.AddWithValue("chosen_task_weight_kg", d.ChosenTaskWeightKg);
+                    cmd.Parameters.AddWithValue("buffer_level_before", d.BufferLevelBefore);
+                    cmd.Parameters.AddWithValue("buffer_level_after", d.BufferLevelAfter);
+                    cmd.Parameters.AddWithValue("buffer_capacity", d.BufferCapacity);
+                    cmd.Parameters.AddWithValue("alt_workers_json", (object?)d.AltWorkersJson ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("alt_tasks_json", (object?)d.AltTasksJson ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("active_constraint", (object?)d.ActiveConstraint ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("reason_text", (object?)d.ReasonText ?? DBNull.Value);
+                    batch.BatchCommands.Add(cmd);
+                }
+                await batch.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await tx.CommitAsync(cancellationToken);
+            _logger.LogInformation("Backtest results saved: wave={Wave}, run_id={RunId}, events={Events}, decisions={Decisions}",
+                result.WaveNumber, runId, decisions.ScheduleEvents.Count, decisions.Decisions.Count);
+            return runId;
+        }
+        catch
+        {
+            await tx.RollbackAsync(cancellationToken);
+            throw;
+        }
+    }
+
+    public async Task<List<Services.Backtesting.BacktestRunRecord>> GetBacktestRunsAsync(
+        string? waveNumber = null, int limit = 20, CancellationToken cancellationToken = default)
+    {
+        await using var conn = await OpenConnectionAsync(cancellationToken);
+
+        var sql = @"SELECT id, wave_number, wave_date, wave_status, analyzed_at,
+                        total_repl_groups, total_dist_groups, unique_workers,
+                        actual_active_sec, optimized_duration_sec, improvement_pct,
+                        original_wave_days, optimized_wave_days, days_saved
+                    FROM backtest_runs";
+        if (waveNumber != null)
+            sql += " WHERE wave_number = @wn";
+        sql += " ORDER BY analyzed_at DESC LIMIT @lim";
+
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        if (waveNumber != null)
+            cmd.Parameters.AddWithValue("wn", waveNumber);
+        cmd.Parameters.AddWithValue("lim", limit);
+
+        var result = new List<Services.Backtesting.BacktestRunRecord>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            result.Add(new Services.Backtesting.BacktestRunRecord
+            {
+                Id = reader.GetGuid(0),
+                WaveNumber = reader.GetString(1),
+                WaveDate = reader.GetDateTime(2),
+                WaveStatus = reader.IsDBNull(3) ? null : reader.GetString(3),
+                AnalyzedAt = reader.GetDateTime(4),
+                TotalReplGroups = reader.GetInt32(5),
+                TotalDistGroups = reader.GetInt32(6),
+                UniqueWorkers = reader.GetInt32(7),
+                ActualActiveSec = reader.IsDBNull(8) ? 0 : (double)reader.GetDecimal(8),
+                OptimizedDurationSec = reader.IsDBNull(9) ? 0 : (double)reader.GetDecimal(9),
+                ImprovementPct = reader.IsDBNull(10) ? 0 : (double)reader.GetDecimal(10),
+                OriginalWaveDays = reader.IsDBNull(11) ? 0 : reader.GetInt32(11),
+                OptimizedWaveDays = reader.IsDBNull(12) ? 0 : reader.GetInt32(12),
+                DaysSaved = reader.IsDBNull(13) ? 0 : reader.GetInt32(13)
+            });
+        }
+        return result;
+    }
+
+    public async Task<List<Services.Backtesting.ScheduleEventRecord>> GetScheduleEventsAsync(
+        Guid runId, string? timelineType = null, CancellationToken cancellationToken = default)
+    {
+        await using var conn = await OpenConnectionAsync(cancellationToken);
+
+        var sql = @"SELECT timeline_type, worker_code, worker_name, worker_role,
+                        task_ref, task_type, day_date,
+                        start_time, end_time, duration_sec,
+                        from_bin, to_bin, from_zone, to_zone,
+                        product_code, product_name, weight_kg, qty,
+                        sequence_number, buffer_level, duration_source, transition_sec
+                    FROM backtest_schedule_events
+                    WHERE run_id = @rid";
+        if (timelineType != null)
+            sql += " AND timeline_type = @tt";
+        sql += " ORDER BY sequence_number, start_time";
+
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("rid", runId);
+        if (timelineType != null)
+            cmd.Parameters.AddWithValue("tt", timelineType);
+
+        var result = new List<Services.Backtesting.ScheduleEventRecord>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            result.Add(new Services.Backtesting.ScheduleEventRecord
+            {
+                TimelineType = reader.GetString(0),
+                WorkerCode = reader.GetString(1),
+                WorkerName = reader.IsDBNull(2) ? null : reader.GetString(2),
+                WorkerRole = reader.IsDBNull(3) ? null : reader.GetString(3),
+                TaskRef = reader.IsDBNull(4) ? null : reader.GetString(4),
+                TaskType = reader.IsDBNull(5) ? null : reader.GetString(5),
+                DayDate = reader.GetDateTime(6),
+                StartTime = reader.IsDBNull(7) ? DateTime.MinValue : reader.GetDateTime(7),
+                EndTime = reader.IsDBNull(8) ? DateTime.MinValue : reader.GetDateTime(8),
+                DurationSec = reader.IsDBNull(9) ? 0 : (double)reader.GetDecimal(9),
+                FromBin = reader.IsDBNull(10) ? null : reader.GetString(10),
+                ToBin = reader.IsDBNull(11) ? null : reader.GetString(11),
+                FromZone = reader.IsDBNull(12) ? null : reader.GetString(12),
+                ToZone = reader.IsDBNull(13) ? null : reader.GetString(13),
+                ProductCode = reader.IsDBNull(14) ? null : reader.GetString(14),
+                ProductName = reader.IsDBNull(15) ? null : reader.GetString(15),
+                WeightKg = reader.IsDBNull(16) ? 0 : reader.GetDecimal(16),
+                Qty = reader.IsDBNull(17) ? 0 : reader.GetInt32(17),
+                SequenceNumber = reader.IsDBNull(18) ? 0 : reader.GetInt32(18),
+                BufferLevel = reader.IsDBNull(19) ? 0 : reader.GetInt32(19),
+                DurationSource = reader.IsDBNull(20) ? null : reader.GetString(20),
+                TransitionSec = reader.IsDBNull(21) ? 0 : (double)reader.GetDecimal(21)
+            });
+        }
+        return result;
+    }
+
+    public async Task<List<Services.Backtesting.DecisionLogRecord>> GetDecisionLogAsync(
+        Guid runId, CancellationToken cancellationToken = default)
+    {
+        await using var conn = await OpenConnectionAsync(cancellationToken);
+
+        await using var cmd = new NpgsqlCommand(@"
+            SELECT decision_seq, day_date, decision_type,
+                   task_ref, task_type, chosen_worker_code,
+                   chosen_worker_remaining_sec, chosen_task_priority,
+                   chosen_task_duration_sec, chosen_task_weight_kg,
+                   buffer_level_before, buffer_level_after, buffer_capacity,
+                   alt_workers_json::text, alt_tasks_json::text,
+                   active_constraint, reason_text
+            FROM backtest_decision_log
+            WHERE run_id = @rid
+            ORDER BY decision_seq", conn);
+        cmd.Parameters.AddWithValue("rid", runId);
+
+        var result = new List<Services.Backtesting.DecisionLogRecord>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            result.Add(new Services.Backtesting.DecisionLogRecord
+            {
+                DecisionSeq = reader.GetInt32(0),
+                DayDate = reader.GetDateTime(1),
+                DecisionType = reader.GetString(2),
+                TaskRef = reader.IsDBNull(3) ? null : reader.GetString(3),
+                TaskType = reader.IsDBNull(4) ? null : reader.GetString(4),
+                ChosenWorkerCode = reader.IsDBNull(5) ? null : reader.GetString(5),
+                ChosenWorkerRemainingSec = reader.IsDBNull(6) ? 0 : (double)reader.GetDecimal(6),
+                ChosenTaskPriority = reader.IsDBNull(7) ? 0 : (double)reader.GetDecimal(7),
+                ChosenTaskDurationSec = reader.IsDBNull(8) ? 0 : (double)reader.GetDecimal(8),
+                ChosenTaskWeightKg = reader.IsDBNull(9) ? 0 : reader.GetDecimal(9),
+                BufferLevelBefore = reader.IsDBNull(10) ? 0 : reader.GetInt32(10),
+                BufferLevelAfter = reader.IsDBNull(11) ? 0 : reader.GetInt32(11),
+                BufferCapacity = reader.IsDBNull(12) ? 0 : reader.GetInt32(12),
+                AltWorkersJson = reader.IsDBNull(13) ? null : reader.GetString(13),
+                AltTasksJson = reader.IsDBNull(14) ? null : reader.GetString(14),
+                ActiveConstraint = reader.IsDBNull(15) ? null : reader.GetString(15),
+                ReasonText = reader.IsDBNull(16) ? null : reader.GetString(16)
+            });
+        }
+        return result;
     }
 
     public async ValueTask DisposeAsync()

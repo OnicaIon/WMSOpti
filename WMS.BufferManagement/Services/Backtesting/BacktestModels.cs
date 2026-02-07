@@ -349,6 +349,10 @@ public class BacktestResult
     public int PickerTransitionCount { get; set; }
     /// <summary>Количество переходов форклифтов (для статистики)</summary>
     public int ForkliftTransitionCount { get; set; }
+
+    /// <summary>Контекст решений оптимизатора (для сохранения в БД)</summary>
+    [JsonIgnore]
+    public SimulationDecisionContext? DecisionContext { get; set; }
 }
 
 /// <summary>
@@ -400,4 +404,10 @@ public class TaskDetail
     public double? LinkedActualDurationSec { get; set; }
     public string? LinkedOptWorkerCode { get; set; }
     public double? LinkedOptDurationSec { get; set; }
+
+    // Дополнительно для БД
+    /// <summary>Приоритет палеты: weight*1000 - duration*10 - zoneDistance</summary>
+    public double PriorityScore { get; set; }
+    /// <summary>Источник оценки длительности: actual / route_stats / picker_product / default</summary>
+    public string DurationSource { get; set; } = "actual";
 }

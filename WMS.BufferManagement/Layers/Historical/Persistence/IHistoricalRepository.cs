@@ -212,6 +212,41 @@ public interface IHistoricalRepository
     /// Получить ёмкость буфера (количество ячеек в буферных зонах)
     /// </summary>
     Task<int> GetBufferCapacityAsync(CancellationToken cancellationToken = default);
+
+    // === Backtest Persistence ===
+
+    /// <summary>
+    /// Сохранить полный результат бэктеста в БД (все 6 таблиц).
+    /// При повторном запуске той же волны — удаляет старые данные (CASCADE) и записывает заново.
+    /// </summary>
+    Task<Guid> SaveBacktestResultAsync(
+        Services.Backtesting.BacktestResult result,
+        Services.Backtesting.SimulationDecisionContext decisions,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Получить список бэктестов (для UI). Фильтр по волне опционален.
+    /// </summary>
+    Task<List<Services.Backtesting.BacktestRunRecord>> GetBacktestRunsAsync(
+        string? waveNumber = null,
+        int limit = 20,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Получить события для диаграммы Ганта по run_id.
+    /// timelineType: "fact", "optimized" или null (оба).
+    /// </summary>
+    Task<List<Services.Backtesting.ScheduleEventRecord>> GetScheduleEventsAsync(
+        Guid runId,
+        string? timelineType = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Получить лог решений оптимизатора по run_id.
+    /// </summary>
+    Task<List<Services.Backtesting.DecisionLogRecord>> GetDecisionLogAsync(
+        Guid runId,
+        CancellationToken cancellationToken = default);
 }
 
 // === Дополнительные модели для статистики ===

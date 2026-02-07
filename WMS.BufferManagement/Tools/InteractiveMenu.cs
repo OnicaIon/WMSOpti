@@ -390,7 +390,23 @@ public static class InteractiveMenu
 
         // Подробный отчёт в файл
         var reportPath = await BacktestReportWriter.WriteDetailedReportAsync(result, _reportsDir);
-        SystemConsole.WriteLine($"\u041f\u043e\u0434\u0440\u043e\u0431\u043d\u044b\u0439 \u043e\u0442\u0447\u0451\u0442: {reportPath}");
+        SystemConsole.WriteLine($"Подробный отчёт: {reportPath}");
+
+        // Сохранение результатов в БД
+        if (result.DecisionContext != null)
+        {
+            SystemConsole.WriteLine("  Сохранение результатов в БД...");
+            try
+            {
+                var runId = await _repository.SaveBacktestResultAsync(result, result.DecisionContext);
+                SystemConsole.WriteLine($"  Сохранено: run_id = {runId}");
+                SystemConsole.WriteLine($"  Events: {result.DecisionContext.ScheduleEvents.Count}, Решений: {result.DecisionContext.Decisions.Count}");
+            }
+            catch (Exception ex)
+            {
+                SystemConsole.WriteLine($"  Ошибка сохранения в БД: {ex.Message}");
+            }
+        }
     }
 
     // ============================================================================
