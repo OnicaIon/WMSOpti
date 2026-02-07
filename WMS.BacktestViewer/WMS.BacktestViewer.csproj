@@ -16,14 +16,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!--
-      DevExpress 21.2 — раскомментируйте после установки DevExpress через NuGet или GAC.
-      В VS: Tools → NuGet Package Manager → добавить DevExpress feed, затем:
-      Install-Package DevExpress.WindowsForms.GanttControl -Version 21.2.*
-    -->
-    <!--
     <PackageReference Include="DevExpress.Win.Gantt" Version="21.2.*" />
-    -->
   </ItemGroup>
 
 </Project>

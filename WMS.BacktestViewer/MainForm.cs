@@ -1,17 +1,15 @@
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Drawing;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using DevExpress.XtraGantt;
+using DevExpress.XtraTreeList;
+using DevExpress.XtraTreeList.Columns;
 using WMS.BacktestViewer.Data;
 using WMS.BacktestViewer.Models;
-
-// DevExpress — раскомментировать после добавления ссылок:
-// using DevExpress.XtraGantt;
-// using DevExpress.XtraTreeList;
-// using DevExpress.XtraTreeList.Columns;
-// using DevExpress.XtraEditors;
 
 namespace WMS.BacktestViewer
 {
@@ -34,9 +32,9 @@ namespace WMS.BacktestViewer
         private Label _lblStatus;
         private Label _lblSummary;
 
-        // Гант-панели (будут заменены на DevExpress GanttControl)
-        private DataGridView _gridFact;
-        private DataGridView _gridOptimized;
+        // DevExpress Gantt
+        private GanttControl _ganttFact;
+        private GanttControl _ganttOptimized;
 
         public MainForm()
         {
@@ -110,7 +108,7 @@ namespace WMS.BacktestViewer
             {
                 Dock = DockStyle.Fill,
                 Orientation = Orientation.Horizontal,
-                SplitterDistance = 500
+                SplitterDistance = 550
             };
 
             // === Верхняя часть: два Ганта рядом ===
@@ -118,7 +116,7 @@ namespace WMS.BacktestViewer
             {
                 Dock = DockStyle.Fill,
                 Orientation = Orientation.Vertical,
-                SplitterDistance = 750
+                SplitterDistance = 780
             };
 
             // Панель ФАКТ
@@ -132,8 +130,8 @@ namespace WMS.BacktestViewer
                 Font = new Font("Segoe UI", 10, FontStyle.Bold),
                 TextAlign = ContentAlignment.MiddleCenter
             };
-            _gridFact = CreateGanttGrid();
-            factPanel.Controls.Add(_gridFact);
+            _ganttFact = CreateGanttControl();
+            factPanel.Controls.Add(_ganttFact);
             factPanel.Controls.Add(lblFact);
 
             // Панель ОПТИМИЗАЦИЯ
@@ -147,8 +145,8 @@ namespace WMS.BacktestViewer
                 Font = new Font("Segoe UI", 10, FontStyle.Bold),
                 TextAlign = ContentAlignment.MiddleCenter
             };
-            _gridOptimized = CreateGanttGrid();
-            optPanel.Controls.Add(_gridOptimized);
+            _ganttOptimized = CreateGanttControl();
+            optPanel.Controls.Add(_ganttOptimized);
             optPanel.Controls.Add(lblOpt);
 
             _splitGantt.Panel1.Controls.Add(factPanel);
@@ -181,42 +179,132 @@ namespace WMS.BacktestViewer
         }
 
         /// <summary>
-        /// Создать DataGridView для визуализации расписания (замена GanttControl)
-        /// Когда DevExpress подключён — заменить на GanttControl
+        /// Создать DevExpress GanttControl с иерархией по работникам
         /// </summary>
-        private DataGridView CreateGanttGrid()
+        private GanttControl CreateGanttControl()
         {
-            var grid = new DataGridView
+            var gantt = new GanttControl
             {
-                Dock = DockStyle.Fill,
-                ReadOnly = true,
-                AllowUserToAddRows = false,
-                AllowUserToDeleteRows = false,
-                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
-                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
-                RowHeadersVisible = false,
-                Font = new Font("Consolas", 9),
-                AlternatingRowsDefaultCellStyle = new DataGridViewCellStyle
-                {
-                    BackColor = Color.FromArgb(245, 245, 245)
-                }
+                Dock = DockStyle.Fill
             };
-            grid.Columns.AddRange(new DataGridViewColumn[]
+
+            // Колонки TreeList (левая панель — дерево)
+            gantt.Columns.AddRange(new TreeListColumn[]
             {
-                new DataGridViewTextBoxColumn { Name = "Worker", HeaderText = "Работник", Width = 80 },
-                new DataGridViewTextBoxColumn { Name = "Role", HeaderText = "Роль", Width = 60 },
-                new DataGridViewTextBoxColumn { Name = "TaskType", HeaderText = "Тип", Width = 50 },
-                new DataGridViewTextBoxColumn { Name = "Start", HeaderText = "Начало", Width = 80 },
-                new DataGridViewTextBoxColumn { Name = "End", HeaderText = "Конец", Width = 80 },
-                new DataGridViewTextBoxColumn { Name = "Duration", HeaderText = "Сек", Width = 40 },
-                new DataGridViewTextBoxColumn { Name = "Route", HeaderText = "Маршрут", Width = 60 },
-                new DataGridViewTextBoxColumn { Name = "Weight", HeaderText = "Вес,кг", Width = 50 },
-                new DataGridViewTextBoxColumn { Name = "Buffer", HeaderText = "Буфер", Width = 45 },
-                new DataGridViewTextBoxColumn { Name = "Transition", HeaderText = "Переход,с", Width = 55 },
-                new DataGridViewTextBoxColumn { Name = "Seq", HeaderText = "#", Width = 30 },
-                new DataGridViewTextBoxColumn { Name = "Product", HeaderText = "Товар", Width = 100 },
+                new TreeListColumn { FieldName = "Name", Caption = "Работник / Задача", VisibleIndex = 0, Width = 180 },
+                new TreeListColumn { FieldName = "TaskType", Caption = "Тип", VisibleIndex = 1, Width = 50 },
+                new TreeListColumn { FieldName = "Route", Caption = "Маршрут", VisibleIndex = 2, Width = 60 },
+                new TreeListColumn { FieldName = "Weight", Caption = "Вес,кг", VisibleIndex = 3, Width = 50 },
+                new TreeListColumn { FieldName = "DurationStr", Caption = "Длит.", VisibleIndex = 4, Width = 50 },
+                new TreeListColumn { FieldName = "BufferStr", Caption = "Буфер", VisibleIndex = 5, Width = 45 },
             });
-            return grid;
+
+            // Маппинг полей для Ганта
+            gantt.TreeListMappings.KeyFieldName = "Id";
+            gantt.TreeListMappings.ParentFieldName = "ParentId";
+
+            gantt.ChartMappings.TextFieldName = "DisplayText";
+            gantt.ChartMappings.StartDateFieldName = "StartDate";
+            gantt.ChartMappings.FinishDateFieldName = "FinishDate";
+            gantt.ChartMappings.ProgressFieldName = "Progress";
+
+            // Настройки вида
+            gantt.OptionsView.ShowBaseline = false;
+
+            // Раскрывать все узлы
+            gantt.OptionsBehavior.Editable = false;
+
+            return gantt;
+        }
+
+        /// <summary>
+        /// Подготовить данные для GanttControl — иерархия: Работник → Задачи
+        /// </summary>
+        private DataTable BuildGanttDataTable(List<GanttTask> events)
+        {
+            var dt = new DataTable();
+            dt.Columns.Add("Id", typeof(int));
+            dt.Columns.Add("ParentId", typeof(int));
+            dt.Columns.Add("Name", typeof(string));
+            dt.Columns.Add("TaskType", typeof(string));
+            dt.Columns.Add("Route", typeof(string));
+            dt.Columns.Add("Weight", typeof(string));
+            dt.Columns.Add("DurationStr", typeof(string));
+            dt.Columns.Add("BufferStr", typeof(string));
+            dt.Columns.Add("DisplayText", typeof(string));
+            dt.Columns.Add("StartDate", typeof(DateTime));
+            dt.Columns.Add("FinishDate", typeof(DateTime));
+            dt.Columns.Add("Progress", typeof(double));
+
+            // Группировка по работникам
+            var workerGroups = events
+                .GroupBy(e => e.WorkerCode)
+                .OrderBy(g => g.First().WorkerRole)
+                .ThenBy(g => g.Key)
+                .ToList();
+
+            int nextId = 1;
+            foreach (var wg in workerGroups)
+            {
+                var first = wg.First();
+                var workerId = nextId++;
+                var workerTasks = wg.OrderBy(e => e.StartTime).ToList();
+
+                // Работник = summary row (parent)
+                var workerStart = workerTasks.Min(e => e.StartTime);
+                var workerEnd = workerTasks.Max(e => e.EndTime);
+                var totalDur = workerTasks.Sum(e => e.DurationSec);
+                var role = first.WorkerRole ?? "?";
+                var roleLetter = role.Length >= 3 ? role.Substring(0, 3) : role;
+
+                dt.Rows.Add(
+                    workerId,
+                    DBNull.Value,  // нет родителя
+                    $"[{roleLetter}] {first.WorkerCode} ({first.WorkerName})",
+                    roleLetter,
+                    "",
+                    $"{workerTasks.Sum(e => e.WeightKg):F0}",
+                    FormatDuration(totalDur),
+                    "",
+                    $"{first.WorkerCode}: {workerTasks.Count} задач, {FormatDuration(totalDur)}",
+                    workerStart,
+                    workerEnd,
+                    100.0
+                );
+
+                // Задачи работника (children)
+                foreach (var task in workerTasks)
+                {
+                    var taskId = nextId++;
+                    var route = $"{task.FromZone}→{task.ToZone}";
+                    var typeShort = task.TaskType?.Length >= 4
+                        ? task.TaskType.Substring(0, 4) : (task.TaskType ?? "?");
+
+                    dt.Rows.Add(
+                        taskId,
+                        workerId,  // родитель = работник
+                        task.ProductName ?? task.ProductCode ?? task.TaskRef?.Substring(0, 8),
+                        typeShort,
+                        route,
+                        $"{task.WeightKg:F0}",
+                        $"{task.DurationSec:F0}с",
+                        task.BufferLevel > 0 ? task.BufferLevel.ToString() : "",
+                        $"{typeShort} {route} {task.WeightKg:F0}кг {task.DurationSec:F0}с",
+                        task.StartTime,
+                        task.EndTime > task.StartTime ? task.EndTime : task.StartTime.AddSeconds(Math.Max(task.DurationSec, 1)),
+                        100.0
+                    );
+                }
+            }
+
+            return dt;
+        }
+
+        private static string FormatDuration(double totalSec)
+        {
+            if (totalSec < 60) return $"{totalSec:F0}с";
+            if (totalSec < 3600) return $"{totalSec / 60:F1}м";
+            return $"{totalSec / 3600:F1}ч";
         }
 
         private DataGridView CreateDecisionsGrid()
@@ -259,7 +347,7 @@ namespace WMS.BacktestViewer
                 _lblStatus.Text = "Загрузка списка волн...";
                 _runs = await _dataProvider.GetBacktestRunsAsync();
                 _cmbWaves.DataSource = _runs;
-                _cmbWaves.DisplayMember = null; // использует ToString()
+                _cmbWaves.DisplayMember = null;
                 _lblStatus.Text = $"Загружено {_runs.Count} бэктестов";
             }
             catch (Exception ex)
@@ -272,7 +360,7 @@ namespace WMS.BacktestViewer
 
         private async Task LoadBacktestDataAsync()
         {
-            if (_cmbWaves.SelectedItem is not BacktestRunInfo run)
+            if (!(_cmbWaves.SelectedItem is BacktestRunInfo run))
                 return;
 
             try
@@ -280,29 +368,31 @@ namespace WMS.BacktestViewer
                 _lblStatus.Text = $"Загрузка данных волны {run.WaveNumber}...";
                 _btnLoad.Enabled = false;
 
-                // Загружаем параллельно events и decisions
                 var eventsTask = _dataProvider.GetScheduleEventsAsync(run.Id);
                 var decisionsTask = _dataProvider.GetDecisionLogAsync(run.Id);
-
                 await Task.WhenAll(eventsTask, decisionsTask);
 
                 _allEvents = eventsTask.Result;
                 _decisions = decisionsTask.Result;
 
-                // Разделяем events по типу
                 var factEvents = _allEvents.Where(e => e.TimelineType == "fact")
                     .OrderBy(e => e.WorkerCode).ThenBy(e => e.StartTime).ToList();
                 var optEvents = _allEvents.Where(e => e.TimelineType == "optimized")
                     .OrderBy(e => e.WorkerCode).ThenBy(e => e.StartTime).ToList();
 
-                // Заполняем гриды
-                FillGanttGrid(_gridFact, factEvents);
-                FillGanttGrid(_gridOptimized, optEvents);
-                FillDecisionsGrid(_gridDecisions, _decisions);
+                // Заполняем Ганты
+                _ganttFact.DataSource = BuildGanttDataTable(factEvents);
+                _ganttFact.ExpandAll();
 
-                // Цвета по типу задачи
-                ColorizeGrid(_gridFact, factEvents);
-                ColorizeGrid(_gridOptimized, optEvents);
+                _ganttOptimized.DataSource = BuildGanttDataTable(optEvents);
+                _ganttOptimized.ExpandAll();
+
+                // Раскрасить бары по типу задачи
+                SetGanttAppearance(_ganttFact);
+                SetGanttAppearance(_ganttOptimized);
+
+                // Лог решений
+                FillDecisionsGrid(_gridDecisions, _decisions);
 
                 _lblSummary.Text = $"Факт: {factEvents.Count} палет | " +
                     $"Опт: {optEvents.Count} палет | " +
@@ -323,26 +413,23 @@ namespace WMS.BacktestViewer
             }
         }
 
-        private void FillGanttGrid(DataGridView grid, List<GanttTask> events)
+        private void SetGanttAppearance(GanttControl gantt)
         {
-            grid.Rows.Clear();
-            foreach (var e in events)
+            // Подписка на отрисовку баров — цвет зависит от типа задачи
+            gantt.CustomDrawTask += (sender, e) =>
             {
-                grid.Rows.Add(
-                    e.WorkerCode,
-                    e.WorkerRole?.Substring(0, Math.Min(3, e.WorkerRole?.Length ?? 0)),
-                    e.TaskType?.Substring(0, Math.Min(4, e.TaskType?.Length ?? 0)),
-                    e.StartTime.ToString("HH:mm:ss"),
-                    e.EndTime.ToString("HH:mm:ss"),
-                    e.DurationSec.ToString("F0"),
-                    $"{e.FromZone}→{e.ToZone}",
-                    e.WeightKg.ToString("F0"),
-                    e.BufferLevel.ToString(),
-                    e.TransitionSec.ToString("F0"),
-                    e.SequenceNumber > 0 ? e.SequenceNumber.ToString() : "",
-                    e.ProductName ?? e.ProductCode
-                );
-            }
+                if (e.Node == null || e.Node.ParentNode == null) return; // skip parent rows
+
+                var taskType = e.Node.GetValue("TaskType")?.ToString() ?? "";
+                if (taskType.StartsWith("Repl"))
+                {
+                    e.Appearance.BackColor = Color.FromArgb(100, 150, 255); // синий — replenishment
+                }
+                else if (taskType.StartsWith("Dist"))
+                {
+                    e.Appearance.BackColor = Color.FromArgb(80, 200, 120); // зелёный — distribution
+                }
+            };
         }
 
         private void FillDecisionsGrid(DataGridView grid, List<DecisionInfo> decisions)
@@ -364,78 +451,12 @@ namespace WMS.BacktestViewer
                 );
             }
 
-            // Подсветить skip-решения
             foreach (DataGridViewRow row in grid.Rows)
             {
                 var type = row.Cells["Type"].Value?.ToString() ?? "";
                 if (type.StartsWith("skip"))
-                {
                     row.DefaultCellStyle.BackColor = Color.FromArgb(255, 220, 220);
-                }
-            }
-        }
-
-        private void ColorizeGrid(DataGridView grid, List<GanttTask> events)
-        {
-            for (int i = 0; i < Math.Min(grid.Rows.Count, events.Count); i++)
-            {
-                var e = events[i];
-                var row = grid.Rows[i];
-                if (e.TaskType == "Replenishment")
-                    row.DefaultCellStyle.BackColor = Color.FromArgb(220, 235, 255); // голубой
-                else if (e.TaskType == "Distribution")
-                    row.DefaultCellStyle.BackColor = Color.FromArgb(220, 255, 230); // зелёный
             }
         }
     }
 }
-
-// =============================================================================
-// ЗАМЕЧАНИЕ: Ниже пример интеграции с DevExpress GanttControl 21.2
-// После раскомментирования ссылок в .csproj, замените DataGridView на GanttControl:
-//
-// private GanttControl CreateDevExpressGantt(string title)
-// {
-//     var gantt = new GanttControl();
-//     gantt.Dock = DockStyle.Fill;
-//
-//     // Колонки TreeList (левая панель)
-//     gantt.Columns.Add(new TreeListColumn { FieldName = "WorkerCode", Caption = "Работник", Width = 100 });
-//     gantt.Columns.Add(new TreeListColumn { FieldName = "TaskType", Caption = "Тип", Width = 60 });
-//     gantt.Columns.Add(new TreeListColumn { FieldName = "Route", Caption = "Маршрут", Width = 60 });
-//     gantt.Columns.Add(new TreeListColumn { FieldName = "WeightKg", Caption = "Вес", Width = 50 });
-//
-//     // Маппинг полей
-//     gantt.TreeListMappings.KeyFieldName = "Id";
-//     gantt.TreeListMappings.ParentFieldName = "ParentId";
-//     gantt.ChartMappings.TextFieldName = "DisplayName";
-//     gantt.ChartMappings.StartDateFieldName = "StartTime";
-//     gantt.ChartMappings.FinishDateFieldName = "EndTime";
-//     gantt.ChartMappings.ProgressFieldName = "Progress";
-//
-//     // Настройки вида
-//     gantt.OptionsView.ShowBaseline = false;
-//     gantt.OptionsView.ShowResources = true;
-//
-//     return gantt;
-// }
-//
-// Биндинг данных:
-//   var tasks = events.Select((e, i) => new {
-//       Id = i + 1,
-//       ParentId = (int?)null, // плоская структура, или группировка по WorkerCode
-//       e.WorkerCode,
-//       e.TaskType,
-//       Route = $"{e.FromZone}→{e.ToZone}",
-//       e.WeightKg,
-//       e.StartTime,
-//       e.EndTime,
-//       e.DisplayName,
-//       Progress = 100
-//   }).ToList();
-//   gantt.DataSource = tasks;
-//
-// Для иерархии по работникам:
-//   ParentId = null для "ресурса" (работника)
-//   ParentId = id работника для задачи
-// =============================================================================
