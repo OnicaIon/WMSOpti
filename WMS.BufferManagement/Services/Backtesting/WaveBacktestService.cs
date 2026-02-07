@@ -870,7 +870,8 @@ public class WaveBacktestService
         // Связать repl↔dist через PrevTaskRef
         var detailByRef = taskDetails
             .Where(d => !string.IsNullOrEmpty(d.TaskRef))
-            .ToDictionary(d => d.TaskRef);
+            .GroupBy(d => d.TaskRef)
+            .ToDictionary(g => g.Key, g => g.First());
 
         foreach (var td in taskDetails)
         {
