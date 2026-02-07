@@ -273,14 +273,22 @@ public class WaveBacktestService
             .Select(group =>
             {
                 var firstGroup = group.First();
-                var actions = group.SelectMany(g => g.Actions).ToList();
+                var actionsWithGroup = group
+                    .SelectMany(g => g.Actions.Select(a => new { Group = g, Action = a }))
+                    .ToList();
 
-                var actionTimings = actions.Select(a =>
+                var actionTimings = actionsWithGroup.Select(x =>
                 {
+                    var a = x.Action;
                     double dur = a.DurationSec ?? 0;
                     if (dur <= 0 && a.CompletedAt.HasValue && a.StartedAt.HasValue)
                         dur = (a.CompletedAt.Value - a.StartedAt.Value).TotalSeconds;
                     if (dur < 0) dur = 0;
+
+                    // TaskType: PrevTaskRef пустой = Replenishment, иначе Distribution
+                    var taskType = string.IsNullOrEmpty(x.Group.PrevTaskRef)
+                        || x.Group.PrevTaskRef == "00000000-0000-0000-0000-000000000000"
+                        ? "Replenishment" : "Distribution";
 
                     return new ActionTiming
                     {
@@ -293,9 +301,12 @@ public class WaveBacktestService
                         WeightKg = a.WeightKg,
                         Qty = a.QtyFact > 0 ? a.QtyFact : a.QtyPlan,
                         DurationSec = dur,
-                        WorkerCode = firstGroup.AssigneeCode
+                        WorkerCode = firstGroup.AssigneeCode,
+                        TaskGroupRef = x.Group.TaskRef,
+                        TaskType = taskType
                     };
                 }).ToList();
+                var actions = actionsWithGroup.Select(x => x.Action).ToList();
 
                 var completed = actions.Where(a => a.CompletedAt.HasValue).ToList();
                 var started = actions.Where(a => a.StartedAt.HasValue).ToList();
