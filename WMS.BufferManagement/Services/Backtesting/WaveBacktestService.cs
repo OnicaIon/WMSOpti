@@ -889,6 +889,12 @@ public class WaveBacktestService
         var workerTimeOffset = forkliftCapacity.Keys.Concat(pickerCapacity.Keys)
             .ToDictionary(k => k, _ => 0.0);
 
+        // Время готовности палет в буфере (когда форклифт завершит repl)
+        // Палеты от предыдущих дней уже в буфере → доступны в t=0
+        var palletReadyTimes = new List<double>();
+        for (int i = 0; i < bufferLevel; i++)
+            palletReadyTimes.Add(0.0);
+
         int replDone = 0, distDone = 0;
         const double tolerance = 1.0;
 
@@ -933,6 +939,9 @@ public class WaveBacktestService
                     completedRepl.Add(bestRepl.TaskGroupRef);
                     bufferLevel++;
                     replDone++;
+                    // Палета будет в буфере когда форклифт закончит
+                    palletReadyTimes.Add(forkliftLoad[bestForklift]);
+                    palletReadyTimes.Sort();
 
                     if (!assignments.ContainsKey(bestForklift))
                         assignments[bestForklift] = new List<ActionTiming>();
@@ -1025,6 +1034,9 @@ public class WaveBacktestService
                     var hasPersonalEstimate = pickerLookup != null && productCategoryMap != null
                         && workerCategoryAvg != null && categoryAvg != null;
 
+                    // Самая ранняя палета в буфере — пикер не начнёт раньше
+                    var earliestPalletTime = palletReadyTimes.Count > 0 ? palletReadyTimes[0] : 0.0;
+
                     foreach (var kv in pickerRemaining)
                     {
                         var estDur = hasPersonalEstimate
@@ -1035,7 +1047,9 @@ public class WaveBacktestService
 
                         if (kv.Value < estDur - tolerance) continue; // не хватает capacity
 
-                        var score = pickerFinishTime[kv.Key] + estDur;
+                        // ECT: реальный старт = max(когда пикер свободен, когда палета готова)
+                        var realStart = Math.Max(pickerFinishTime[kv.Key], earliestPalletTime);
+                        var score = realStart + estDur;
                         if (score < bestPickerScore)
                         {
                             bestPickerScore = score;
@@ -1054,6 +1068,13 @@ public class WaveBacktestService
                         pickerTaskCount[bestPicker]++;
                         bufferLevel--;
                         distDone++;
+                        // Забрать самую раннюю готовую палету из буфера
+                        var palletReadyTime = 0.0;
+                        if (palletReadyTimes.Count > 0)
+                        {
+                            palletReadyTime = palletReadyTimes[0];
+                            palletReadyTimes.RemoveAt(0);
+                        }
 
                         if (!assignments.ContainsKey(bestPicker))
                             assignments[bestPicker] = new List<ActionTiming>();
@@ -1103,7 +1124,9 @@ public class WaveBacktestService
                             });
 
                             // Событие Ганта (optimized)
-                            var startOffset = workerTimeOffset[bestPicker] + pkTransition;
+                            // Пикер не может начать раньше чем палета готова в буфере
+                            var pickerFreeAt = workerTimeOffset[bestPicker] + pkTransition;
+                            var startOffset = Math.Max(pickerFreeAt, palletReadyTime);
                             var endOffset = startOffset + bestPickerEstDur;
                             workerTimeOffset[bestPicker] = endOffset;
                             var firstAction = readyDist.Actions.FirstOrDefault();
@@ -1178,9 +1201,9 @@ public class WaveBacktestService
             }
         }
 
-        var maxForklift = forkliftLoad.Any() ? forkliftLoad.Values.Max() : 0;
-        var maxPicker = pickerFinishTime.Any() ? pickerFinishTime.Values.Max() : 0;
-        var makespan = TimeSpan.FromSeconds(Math.Max(maxForklift, maxPicker));
+        // Makespan = макс. offset любого работника (с учётом ожидания палет)
+        var makespan = TimeSpan.FromSeconds(
+            workerTimeOffset.Any() ? workerTimeOffset.Values.Max() : 0);
 
         return (replDone, distDone, assignments, makespan);
     }
