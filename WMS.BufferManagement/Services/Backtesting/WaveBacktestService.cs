@@ -1128,9 +1128,9 @@ public class WaveBacktestService
 
                         if (!assignments.ContainsKey(bestPicker))
                             assignments[bestPicker] = new List<ActionTiming>();
-                        // Масштабировать длительности действий пропорционально персональной оценке
-                        var origGroupDur = readyDist.DurationSec > 0 ? readyDist.DurationSec : 1.0;
-                        var durScale = bestPickerEstDur / origGroupDur;
+                        // Масштабировать длительности действий: sum(scaled) должна = bestPickerEstDur
+                        var rawActionSum = readyDist.Actions.Sum(a => a.DurationSec);
+                        var durScale = rawActionSum > 0 ? bestPickerEstDur / rawActionSum : 1.0;
                         foreach (var aa in readyDist.Actions)
                         {
                             var at = CreateActionTiming(aa, bestPicker);
