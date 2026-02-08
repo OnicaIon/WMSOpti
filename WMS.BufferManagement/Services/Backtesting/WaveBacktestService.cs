@@ -556,7 +556,11 @@ public class WaveBacktestService
                 WorkerCode = g.Key.OriginalWorkerCode,
                 WorkerName = g.First().OriginalWorkerName,
                 Day = g.Key.Day,
-                CapacitySec = ComputeWorkerDayCapacitySec(g.ToList())
+                CapacitySec = ComputeWorkerDayCapacitySec(g.ToList()),
+                // Время начала смены: самый ранний StartedAt относительно начала дня (сек от полуночи)
+                ShiftStartSec = g.Where(a => a.Action.StartedAt.HasValue)
+                    .Select(a => (a.Action.StartedAt!.Value - a.Action.StartedAt!.Value.Date).TotalSeconds)
+                    .DefaultIfEmpty(0).Min()
             }).ToList();
 
         var pickerDayData = allAnnotated
@@ -567,7 +571,10 @@ public class WaveBacktestService
                 WorkerCode = g.Key.OriginalWorkerCode,
                 WorkerName = g.First().OriginalWorkerName,
                 Day = g.Key.Day,
-                CapacitySec = ComputeWorkerDayCapacitySec(g.ToList())
+                CapacitySec = ComputeWorkerDayCapacitySec(g.ToList()),
+                ShiftStartSec = g.Where(a => a.Action.StartedAt.HasValue)
+                    .Select(a => (a.Action.StartedAt!.Value - a.Action.StartedAt!.Value.Date).TotalSeconds)
+                    .DefaultIfEmpty(0).Min()
             }).ToList();
 
         var allDays = forkliftDayData.Select(w => w.Day)
@@ -628,6 +635,12 @@ public class WaveBacktestService
             var dayPickers = pickerDayData
                 .Where(w => w.Day == day)
                 .ToDictionary(w => w.WorkerCode, w => w.CapacitySec);
+            var dayForkliftShift = forkliftDayData
+                .Where(w => w.Day == day)
+                .ToDictionary(w => w.WorkerCode, w => w.ShiftStartSec);
+            var dayPickerShift = pickerDayData
+                .Where(w => w.Day == day)
+                .ToDictionary(w => w.WorkerCode, w => w.ShiftStartSec);
 
             int replDone = 0, distDone = 0;
             var dayAssignments = new Dictionary<string, List<ActionTiming>>();
@@ -643,7 +656,8 @@ public class WaveBacktestService
                     day, decisionCtx, workerNames,
                     forkliftSpeedRatio, pickerSpeedRatio,
                     pickerLookup, productCategoryMap ?? new Dictionary<string, string>(),
-                    workerCategoryAvg, categoryAvg, waveMeanDurationSec);
+                    workerCategoryAvg, categoryAvg, waveMeanDurationSec,
+                    dayForkliftShift, dayPickerShift);
 
                 // Merge assignments
                 foreach (var (wc, actions) in dayAssignments)
@@ -748,6 +762,23 @@ public class WaveBacktestService
                 .OrderByDescending(g => g.Sum(w => w.CapacitySec))
                 .FirstOrDefault()?.ToDictionary(w => w.WorkerCode, w => w.CapacitySec)
                 ?? new Dictionary<string, double>();
+            // Смены из лучшего дня для виртуальных дней
+            var bestForkliftDay = forkliftDayData
+                .GroupBy(w => w.Day)
+                .OrderByDescending(g => g.Sum(w => w.CapacitySec))
+                .FirstOrDefault()?.Key;
+            var bestPickerDay = pickerDayData
+                .GroupBy(w => w.Day)
+                .OrderByDescending(g => g.Sum(w => w.CapacitySec))
+                .FirstOrDefault()?.Key;
+            var bestForkliftShift = bestForkliftDay.HasValue
+                ? forkliftDayData.Where(w => w.Day == bestForkliftDay.Value)
+                    .ToDictionary(w => w.WorkerCode, w => w.ShiftStartSec)
+                : new Dictionary<string, double>();
+            var bestPickerShift = bestPickerDay.HasValue
+                ? pickerDayData.Where(w => w.Day == bestPickerDay.Value)
+                    .ToDictionary(w => w.WorkerCode, w => w.ShiftStartSec)
+                : new Dictionary<string, double>();
 
             var lastDay = allDays.Last();
             var maxExtraDays = 30; // защита от бесконечного цикла
@@ -766,7 +797,8 @@ public class WaveBacktestService
                     virtualDay, decisionCtx, workerNames,
                     forkliftSpeedRatio, pickerSpeedRatio,
                     pickerLookup, productCategoryMap ?? new Dictionary<string, string>(),
-                    workerCategoryAvg, categoryAvg, waveMeanDurationSec);
+                    workerCategoryAvg, categoryAvg, waveMeanDurationSec,
+                    bestForkliftShift, bestPickerShift);
 
                 if (replDoneV + distDoneV == 0)
                     break; // нет прогресса — выходим
@@ -875,7 +907,9 @@ public class WaveBacktestService
             Dictionary<string, string>? productCategoryMap = null,
             Dictionary<string, double>? workerCategoryAvg = null,
             Dictionary<string, double>? categoryAvg = null,
-            double waveMeanDurationSec = 120.0)
+            double waveMeanDurationSec = 120.0,
+            Dictionary<string, double>? forkliftShiftStart = null,
+            Dictionary<string, double>? pickerShiftStart = null)
     {
         var assignments = new Dictionary<string, List<ActionTiming>>();
         var forkliftLoad = forkliftCapacity.Keys.ToDictionary(k => k, _ => 0.0);
@@ -885,9 +919,18 @@ public class WaveBacktestService
         var forkliftRemaining = new Dictionary<string, double>(forkliftCapacity);
         var pickerRemaining = new Dictionary<string, double>(pickerCapacity);
 
-        // Per-worker time offset для Ганта (секунды от начала дня)
-        var workerTimeOffset = forkliftCapacity.Keys.Concat(pickerCapacity.Keys)
-            .ToDictionary(k => k, _ => 0.0);
+        // Per-worker time offset для Ганта (секунды от полуночи = начало смены)
+        // Каждый работник начинает не раньше своего фактического прихода на смену
+        var workerTimeOffset = forkliftCapacity.Keys
+            .ToDictionary(k => k, k => forkliftShiftStart?.GetValueOrDefault(k, 0.0) ?? 0.0);
+        foreach (var k in pickerCapacity.Keys)
+            workerTimeOffset[k] = pickerShiftStart?.GetValueOrDefault(k, 0.0) ?? 0.0;
+
+        // Инициализировать forkliftLoad и pickerFinishTime от начала смены
+        foreach (var k in forkliftCapacity.Keys)
+            forkliftLoad[k] = workerTimeOffset[k];
+        foreach (var k in pickerCapacity.Keys)
+            pickerFinishTime[k] = workerTimeOffset[k];
 
         // Время готовности палет в буфере (когда форклифт завершит repl)
         // Палеты от предыдущих дней уже в буфере → доступны в t=0
