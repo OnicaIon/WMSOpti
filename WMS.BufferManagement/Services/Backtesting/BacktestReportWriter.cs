@@ -31,8 +31,8 @@ public static class BacktestReportWriter
         var optMakespanStr = FormatDuration(result.OptimizedDuration);
 
         PrintBoxLine(w, $"  ФАКТ (от-до):  {wallClockStr}");
-        PrintBoxLine(w, $"  ФАКТ makespan: {factMakespanStr} (макс. рабочий/день)");
-        PrintBoxLine(w, $"  ОПТ  makespan: {optMakespanStr} (макс. рабочий/день)");
+        PrintBoxLine(w, $"  ФАКТ (работа): {factMakespanStr} (макс. рабочий/день)");
+        PrintBoxLine(w, $"  ОПТ  (работа): {optMakespanStr} (макс. рабочий/день)");
         PrintBoxLine(w, $"  Метод:         Кросс-дневной пул + буфер");
 
         // Основная метрика: сокращение дней
@@ -134,8 +134,8 @@ public static class BacktestReportWriter
         sb.AppendLine($"  Фактическое начало:    {result.ActualStartTime:dd.MM.yyyy HH:mm:ss}");
         sb.AppendLine($"  Фактическое окончание: {result.ActualEndTime:dd.MM.yyyy HH:mm:ss}");
         sb.AppendLine($"  Факт (от-до):          {FormatDuration(result.ActualWallClockDuration)} (включая ночи/перерывы)");
-        sb.AppendLine($"  Факт makespan:         {FormatDuration(result.ActualActiveDuration)} (макс. рабочий/день)");
-        sb.AppendLine($"  Опт  makespan:         {FormatDuration(result.OptimizedDuration)} (макс. рабочий/день)");
+        sb.AppendLine($"  Факт (работа):         {FormatDuration(result.ActualActiveDuration)} (макс. рабочий/день)");
+        sb.AppendLine($"  Опт  (работа):         {FormatDuration(result.OptimizedDuration)} (макс. рабочий/день)");
         sb.AppendLine($"  Метод:                 Кросс-дневной пул + буфер");
         sb.AppendLine($"  Буфер:                 {result.BufferCapacity} палет (макс)");
         sb.AppendLine($"  Волна:                 {result.OriginalWaveDays} дн. факт -> {result.OptimizedWaveDays} дн. опт ({(result.DaysSaved > 0 ? $"-{result.DaysSaved}" : "0")} дн.)");

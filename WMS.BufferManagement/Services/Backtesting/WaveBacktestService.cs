@@ -655,16 +655,11 @@ public class WaveBacktestService
                 .ToList();
             var dayActualActive = MergeIntervalsAndSum(dayActualIntervals);
 
-            // Фактический makespan: макс. span рабочего (от первого до последнего действия)
+            // Фактический makespan: макс. рабочий по сумме длительностей действий (чистое рабочее время)
             var dayFactMakespanSec = dayAnnotated
                 .Where(a => a.Action.StartedAt.HasValue && a.Action.CompletedAt.HasValue)
                 .GroupBy(a => a.OriginalWorkerCode)
-                .Select(g =>
-                {
-                    var start = g.Min(a => a.Action.StartedAt!.Value);
-                    var end = g.Max(a => a.Action.CompletedAt!.Value);
-                    return (end - start).TotalSeconds;
-                })
+                .Select(g => g.Sum(a => (a.Action.CompletedAt!.Value - a.Action.StartedAt!.Value).TotalSeconds))
                 .DefaultIfEmpty(0)
                 .Max();
             var dayFactMakespan = TimeSpan.FromSeconds(dayFactMakespanSec);
