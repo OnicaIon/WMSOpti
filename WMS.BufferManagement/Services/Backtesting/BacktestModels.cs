@@ -259,6 +259,8 @@ public class DayBreakdown
     public int TotalActions { get; set; }
     /// <summary>Фактическое активное время (merged intervals) за день</summary>
     public TimeSpan ActualActiveDuration { get; set; }
+    /// <summary>Фактический makespan (макс. рабочий: от первого до последнего действия) за день</summary>
+    public TimeSpan ActualMakespan { get; set; }
     /// <summary>Оптимизированный makespan за день</summary>
     public TimeSpan OptimizedMakespan { get; set; }
     public double ImprovementPercent { get; set; }

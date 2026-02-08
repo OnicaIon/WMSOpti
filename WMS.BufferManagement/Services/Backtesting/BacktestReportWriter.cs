@@ -27,12 +27,12 @@ public static class BacktestReportWriter
         PrintBoxSep(w);
 
         var wallClockStr = FormatDuration(result.ActualWallClockDuration);
-        var activeStr = FormatDuration(result.ActualActiveDuration);
-        var optStr = FormatDuration(result.OptimizedDuration);
+        var factMakespanStr = FormatDuration(result.ActualActiveDuration);
+        var optMakespanStr = FormatDuration(result.OptimizedDuration);
 
         PrintBoxLine(w, $"  ФАКТ (от-до):  {wallClockStr}");
-        PrintBoxLine(w, $"  ФАКТ (работа): {activeStr} (сумма ежедневн.)");
-        PrintBoxLine(w, $"  ОПТИМИЗАЦИЯ:   {optStr} (сумма makespan)");
+        PrintBoxLine(w, $"  ФАКТ makespan: {factMakespanStr} (макс. рабочий/день)");
+        PrintBoxLine(w, $"  ОПТ  makespan: {optMakespanStr} (макс. рабочий/день)");
         PrintBoxLine(w, $"  Метод:         Кросс-дневной пул + буфер");
 
         // Основная метрика: сокращение дней
@@ -66,7 +66,7 @@ public static class BacktestReportWriter
                 var delta = db.AdditionalPallets;
                 var deltaStr = delta >= 0 ? $"+{delta}" : $"{delta}";
                 var workers = $"{db.ForkliftWorkers}+{db.PickerWorkers}";
-                var factStr = FormatDurationShort(db.ActualActiveDuration);
+                var factStr = FormatDurationShort(db.ActualMakespan);
                 var optStr2 = FormatDurationShort(db.OptimizedMakespan);
                 PrintBoxLine(w, $"  {db.Date:dd.MM} {origP,5} {optP,4} {deltaStr,4} ->{db.BufferLevelEnd,2} {workers,6}  {factStr,-7} {optStr2,-7}");
             }
@@ -134,8 +134,8 @@ public static class BacktestReportWriter
         sb.AppendLine($"  Фактическое начало:    {result.ActualStartTime:dd.MM.yyyy HH:mm:ss}");
         sb.AppendLine($"  Фактическое окончание: {result.ActualEndTime:dd.MM.yyyy HH:mm:ss}");
         sb.AppendLine($"  Факт (от-до):          {FormatDuration(result.ActualWallClockDuration)} (включая ночи/перерывы)");
-        sb.AppendLine($"  Факт (работа):         {FormatDuration(result.ActualActiveDuration)} (сумма ежедневного активного)");
-        sb.AppendLine($"  Оптимизированное:      {FormatDuration(result.OptimizedDuration)} (сумма ежедневного makespan)");
+        sb.AppendLine($"  Факт makespan:         {FormatDuration(result.ActualActiveDuration)} (макс. рабочий/день)");
+        sb.AppendLine($"  Опт  makespan:         {FormatDuration(result.OptimizedDuration)} (макс. рабочий/день)");
         sb.AppendLine($"  Метод:                 Кросс-дневной пул + буфер");
         sb.AppendLine($"  Буфер:                 {result.BufferCapacity} палет (макс)");
         sb.AppendLine($"  Волна:                 {result.OriginalWaveDays} дн. факт -> {result.OptimizedWaveDays} дн. опт ({(result.DaysSaved > 0 ? $"-{result.DaysSaved}" : "0")} дн.)");
@@ -152,7 +152,7 @@ public static class BacktestReportWriter
         if (result.DayBreakdowns.Any())
         {
             sb.AppendLine("--- РАЗБИВКА ПО ДНЯМ ---");
-            sb.AppendLine($"  {"Дата",-12} {"Ф+П",5} {"ФактП",6} {"ОптП",5} {"+/-",5} {"Буф",4} {"Факт(работа)",14} {"Оптимизация",14} {"Разница",8}");
+            sb.AppendLine($"  {"Дата",-12} {"Ф+П",5} {"ФактП",6} {"ОптП",5} {"+/-",5} {"Буф",4} {"Факт(makespan)",14} {"Опт(makespan)",14} {"Разница",8}");
             sb.AppendLine($"  {new string('-', 85)}");
 
             foreach (var db in result.DayBreakdowns)
@@ -163,12 +163,12 @@ public static class BacktestReportWriter
                 var delta = db.AdditionalPallets;
                 var deltaStr = delta >= 0 ? $"+{delta}" : $"{delta}";
                 var sign = db.ImprovementPercent > 0 ? "-" : "+";
-                sb.AppendLine($"  {db.Date:dd.MM.yyyy}   {workers,5} {origP,6} {optP,5} {deltaStr,5} ->{db.BufferLevelEnd,2} {FormatDurationShort(db.ActualActiveDuration),14} {FormatDurationShort(db.OptimizedMakespan),14} {sign}{Math.Abs(db.ImprovementPercent):F1}%");
+                sb.AppendLine($"  {db.Date:dd.MM.yyyy}   {workers,5} {origP,6} {optP,5} {deltaStr,5} ->{db.BufferLevelEnd,2} {FormatDurationShort(db.ActualMakespan),14} {FormatDurationShort(db.OptimizedMakespan),14} {sign}{Math.Abs(db.ImprovementPercent):F1}%");
             }
 
             var totalOrigP = result.DayBreakdowns.Sum(d => d.OriginalReplGroups + d.OriginalDistGroups);
             var totalOptP = result.DayBreakdowns.Sum(d => d.OptimizedReplGroups + d.OptimizedDistGroups);
-            var totalActual = TimeSpan.FromSeconds(result.DayBreakdowns.Sum(d => d.ActualActiveDuration.TotalSeconds));
+            var totalActual = TimeSpan.FromSeconds(result.DayBreakdowns.Sum(d => d.ActualMakespan.TotalSeconds));
             var totalOpt = TimeSpan.FromSeconds(result.DayBreakdowns.Sum(d => d.OptimizedMakespan.TotalSeconds));
             sb.AppendLine($"  {new string('-', 85)}");
             sb.AppendLine($"  {"ИТОГО",-12} {"",5} {totalOrigP,6} {totalOptP,5} {"",5} {"",4} {FormatDurationShort(totalActual),14} {FormatDurationShort(totalOpt),14} {result.ImprovementPercent:F1}%");

@@ -655,8 +655,22 @@ public class WaveBacktestService
                 .ToList();
             var dayActualActive = MergeIntervalsAndSum(dayActualIntervals);
 
-            var dayImprovement = dayActualActive.TotalSeconds > 0
-                ? ((dayActualActive - dayMakespan).TotalSeconds / dayActualActive.TotalSeconds) * 100
+            // Фактический makespan: макс. span рабочего (от первого до последнего действия)
+            var dayFactMakespanSec = dayAnnotated
+                .Where(a => a.Action.StartedAt.HasValue && a.Action.CompletedAt.HasValue)
+                .GroupBy(a => a.OriginalWorkerCode)
+                .Select(g =>
+                {
+                    var start = g.Min(a => a.Action.StartedAt!.Value);
+                    var end = g.Max(a => a.Action.CompletedAt!.Value);
+                    return (end - start).TotalSeconds;
+                })
+                .DefaultIfEmpty(0)
+                .Max();
+            var dayFactMakespan = TimeSpan.FromSeconds(dayFactMakespanSec);
+
+            var dayImprovement = dayFactMakespanSec > 0
+                ? ((dayFactMakespanSec - dayMakespan.TotalSeconds) / dayFactMakespanSec) * 100
                 : 0;
 
             var origRepl = originalDayReplGroups.GetValueOrDefault(day, 0);
@@ -674,6 +688,7 @@ public class WaveBacktestService
                 DistActions = dayAnnotated.Count(a => a.TaskType == "Distribution"),
                 TotalActions = dayAnnotated.Count,
                 ActualActiveDuration = dayActualActive,
+                ActualMakespan = dayFactMakespan,
                 OptimizedMakespan = dayMakespan,
                 ImprovementPercent = dayImprovement,
                 OriginalReplGroups = origRepl,
@@ -1161,10 +1176,10 @@ public class WaveBacktestService
         List<DayBreakdown> dayBreakdowns,
         Dictionary<string, double>? priorityByRef = null)
     {
-        // Итоговое сравнение: сумма активного времени по дням
-        // Факт: merged intervals (параллельное активное время за день)
+        // Итоговое сравнение: makespan на обеих сторонах (сопоставимые метрики)
+        // Факт: сумма ежедневных makespans (макс. рабочий от первого до последнего действия)
         var actualDuration = TimeSpan.FromSeconds(
-            dayBreakdowns.Sum(d => d.ActualActiveDuration.TotalSeconds));
+            dayBreakdowns.Sum(d => d.ActualMakespan.TotalSeconds));
 
         // Оптимизированное: сумма ежедневных makespans (wall-clock за день)
         var optimizedDuration = TimeSpan.FromSeconds(
