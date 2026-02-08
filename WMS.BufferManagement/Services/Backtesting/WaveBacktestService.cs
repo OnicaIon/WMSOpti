@@ -135,7 +135,7 @@ public class WaveBacktestService
                     TimelineType = "fact",
                     WorkerCode = wt.WorkerCode,
                     WorkerName = wt.WorkerName,
-                    WorkerRole = wt.Role,
+                    WorkerRole = action.TaskType == "Distribution" ? "Picker" : "Forklift",
                     TaskRef = action.TaskGroupRef,
                     TaskType = action.TaskType,
                     DayDate = action.DurationSec > 0 && wt.StartTime != default
