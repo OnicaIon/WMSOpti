@@ -435,8 +435,9 @@ public class WaveBacktestService
         var waveMeanDurationSec = allDurations.Any() ? allDurations.Average() : DefaultRouteDurationSec;
 
         // === Построить task groups с масштабированными длительностями ===
+        // Только палеты с назначенным работником (иначе факт vs опт несопоставимы)
         var replGroupsRaw = allAnnotated
-            .Where(a => a.TaskType == "Replenishment")
+            .Where(a => a.TaskType == "Replenishment" && !string.IsNullOrWhiteSpace(a.OriginalWorkerCode))
             .GroupBy(a => a.TaskGroupRef)
             .Select(g => new
             {
@@ -450,7 +451,7 @@ public class WaveBacktestService
             }).ToList();
 
         var distGroupsRaw = allAnnotated
-            .Where(a => a.TaskType == "Distribution")
+            .Where(a => a.TaskType == "Distribution" && !string.IsNullOrWhiteSpace(a.OriginalWorkerCode))
             .GroupBy(a => a.TaskGroupRef)
             .Select(g => new
             {
@@ -556,13 +557,13 @@ public class WaveBacktestService
             .Concat(pickerDayData.Select(w => w.Day))
             .Distinct().OrderBy(d => d).ToList();
 
-        // Фактические подсчёты по дням (для сравнения)
+        // Фактические подсчёты по дням (для сравнения) — только палеты с назначенным работником
         var originalDayReplGroups = allAnnotated
-            .Where(a => a.TaskType == "Replenishment")
+            .Where(a => a.TaskType == "Replenishment" && !string.IsNullOrWhiteSpace(a.OriginalWorkerCode))
             .GroupBy(a => a.Day)
             .ToDictionary(g => g.Key, g => g.Select(a => a.TaskGroupRef).Distinct().Count());
         var originalDayDistGroups = allAnnotated
-            .Where(a => a.TaskType == "Distribution")
+            .Where(a => a.TaskType == "Distribution" && !string.IsNullOrWhiteSpace(a.OriginalWorkerCode))
             .GroupBy(a => a.Day)
             .ToDictionary(g => g.Key, g => g.Select(a => a.TaskGroupRef).Distinct().Count());
 
@@ -1216,8 +1217,11 @@ public class WaveBacktestService
         }
 
         // Детали заданий — per pallet (task group), НЕ per action
+        // Только палеты с назначенным работником (сопоставимо с оптимизацией)
         var taskDetails = new List<TaskDetail>();
-        var allGroups = data.ReplenishmentTasks.Concat(data.DistributionTasks).ToList();
+        var allGroups = data.ReplenishmentTasks.Concat(data.DistributionTasks)
+            .Where(g => !string.IsNullOrWhiteSpace(g.AssigneeCode))
+            .ToList();
 
         // Маппинг TaskRef → оптимизированный работник (из plan assignments)
         var optWorkerByRef = new Dictionary<string, string>();
@@ -1366,10 +1370,18 @@ public class WaveBacktestService
             WaveNumber = data.WaveNumber,
             WaveDate = data.WaveDate,
             WaveStatus = data.Status,
-            TotalReplenishmentTasks = data.ReplenishmentTasks.Sum(g => g.Actions.Count),
-            TotalDistributionTasks = data.DistributionTasks.Sum(g => g.Actions.Count),
-            TotalActions = data.ReplenishmentTasks.Sum(g => g.Actions.Count) +
-                           data.DistributionTasks.Sum(g => g.Actions.Count),
+            TotalReplenishmentTasks = data.ReplenishmentTasks
+                .Where(g => !string.IsNullOrWhiteSpace(g.AssigneeCode))
+                .Sum(g => g.Actions.Count),
+            TotalDistributionTasks = data.DistributionTasks
+                .Where(g => !string.IsNullOrWhiteSpace(g.AssigneeCode))
+                .Sum(g => g.Actions.Count),
+            TotalActions = data.ReplenishmentTasks
+                .Where(g => !string.IsNullOrWhiteSpace(g.AssigneeCode))
+                .Sum(g => g.Actions.Count) +
+                data.DistributionTasks
+                .Where(g => !string.IsNullOrWhiteSpace(g.AssigneeCode))
+                .Sum(g => g.Actions.Count),
             UniqueWorkers = actual.WorkerTimelines.Count,
             ActualStartTime = actual.StartTime,
             ActualEndTime = actual.EndTime,
@@ -1388,8 +1400,8 @@ public class WaveBacktestService
             DefaultEstimatesUsed = defaultUsed,
             WaveMeanDurationSec = simulated.WaveMeanDurationSec,
             // Кросс-дневные метрики
-            TotalReplGroups = data.ReplenishmentTasks.Count,
-            TotalDistGroups = data.DistributionTasks.Count,
+            TotalReplGroups = data.ReplenishmentTasks.Count(t => !string.IsNullOrWhiteSpace(t.AssigneeCode)),
+            TotalDistGroups = data.DistributionTasks.Count(t => !string.IsNullOrWhiteSpace(t.AssigneeCode)),
             OriginalWaveDays = origWaveDays,
             OptimizedWaveDays = optWaveDays,
             DaysSaved = origWaveDays - optWaveDays,
