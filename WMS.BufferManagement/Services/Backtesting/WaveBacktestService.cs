@@ -484,32 +484,11 @@ public class WaveBacktestService
                 WeightKg = (double)g.Sum(a => a.Action.WeightKg)
             }).ToList();
 
-        // Масштабирование: per-worker-per-day sum(scaled) = merged interval
-        var scaledDurations = new Dictionary<string, double>();
-
-        foreach (var wg in replGroupsRaw.GroupBy(g => (g.OriginalWorker, g.Day)))
-        {
-            var workerActions = allAnnotated
-                .Where(a => a.OriginalWorkerCode == wg.Key.OriginalWorker
-                    && a.Day == wg.Key.Day && a.TaskType == "Replenishment").ToList();
-            var capacity = ComputeWorkerDayCapacitySec(workerActions);
-            var rawTotal = wg.Sum(g => g.RawDurationSec);
-            var scale = rawTotal > 0 ? capacity / rawTotal : 1.0;
-            foreach (var g in wg)
-                scaledDurations[g.TaskGroupRef] = g.RawDurationSec * scale;
-        }
-
-        foreach (var wg in distGroupsRaw.GroupBy(g => (g.OriginalWorker, g.Day)))
-        {
-            var workerActions = allAnnotated
-                .Where(a => a.OriginalWorkerCode == wg.Key.OriginalWorker
-                    && a.Day == wg.Key.Day && a.TaskType == "Distribution").ToList();
-            var capacity = ComputeWorkerDayCapacitySec(workerActions);
-            var rawTotal = wg.Sum(g => g.RawDurationSec);
-            var scale = rawTotal > 0 ? capacity / rawTotal : 1.0;
-            foreach (var g in wg)
-                scaledDurations[g.TaskGroupRef] = g.RawDurationSec * scale;
-        }
+        // DurationSec = raw group span (ComputeGroupSpanSec: max(end) - min(start)).
+        // Масштабирование по capacity/rawTotal УБРАНО: оно привязывало длительность
+        // к оригинальному работнику, и при перераспределении задач давало нереальные
+        // сжатые значения (минуты вместо часов). Теперь каскад EstimateGroupDuration
+        // + speedRatio дают персональную оценку на базе сырого span.
 
         // Построить TaskGroupInfo с приоритетами
         var replGroups = replGroupsRaw.Select(g =>
@@ -518,7 +497,7 @@ public class WaveBacktestService
             {
                 TaskGroupRef = g.TaskGroupRef,
                 TaskType = "Replenishment",
-                DurationSec = scaledDurations.GetValueOrDefault(g.TaskGroupRef, g.RawDurationSec),
+                DurationSec = g.RawDurationSec,
                 WeightKg = g.WeightKg,
                 OriginalWorker = g.OriginalWorker,
                 OriginalWorkerName = g.OriginalWorkerName,
@@ -535,7 +514,7 @@ public class WaveBacktestService
                 TaskGroupRef = g.TaskGroupRef,
                 PrevTaskRef = g.PrevTaskRef,
                 TaskType = "Distribution",
-                DurationSec = scaledDurations.GetValueOrDefault(g.TaskGroupRef, g.RawDurationSec),
+                DurationSec = g.RawDurationSec,
                 WeightKg = g.WeightKg,
                 OriginalWorker = g.OriginalWorker,
                 OriginalWorkerName = g.OriginalWorkerName,
