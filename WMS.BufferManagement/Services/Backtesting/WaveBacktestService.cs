@@ -577,6 +577,20 @@ public class WaveBacktestService
                 return name ?? g.Key; // fallback на код работника
             });
 
+        // === Коэффициент скорости работников (ECT + эффективность) ===
+        // speedRatio < 1 = работник быстрее среднего, > 1 = медленнее
+        var forkliftAvgDur = replGroups.Any() ? replGroups.Average(g => g.DurationSec) : DefaultRouteDurationSec;
+        var forkliftSpeedRatio = replGroups.GroupBy(g => g.OriginalWorker)
+            .ToDictionary(
+                wg => wg.Key,
+                wg => forkliftAvgDur > 0 ? wg.Average(g => g.DurationSec) / forkliftAvgDur : 1.0);
+
+        var pickerAvgDur = distGroups.Any() ? distGroups.Average(g => g.DurationSec) : DefaultRouteDurationSec;
+        var pickerSpeedRatio = distGroups.GroupBy(g => g.OriginalWorker)
+            .ToDictionary(
+                wg => wg.Key,
+                wg => pickerAvgDur > 0 ? wg.Average(g => g.DurationSec) / pickerAvgDur : 1.0);
+
         // === Кросс-дневная симуляция ===
         var replPool = new List<TaskGroupInfo>(replGroups); // отсортированы по Priority ↓
         var distPool = new List<TaskGroupInfo>(distGroups);
@@ -609,7 +623,8 @@ public class WaveBacktestService
                     dayForklifts, dayPickers,
                     ref bufferLevel, _bufferCapacity,
                     forkliftTransitionSec, pickerTransitionSec,
-                    day, decisionCtx, workerNames);
+                    day, decisionCtx, workerNames,
+                    forkliftSpeedRatio, pickerSpeedRatio);
 
                 // Merge assignments
                 foreach (var (wc, actions) in dayAssignments)
@@ -729,7 +744,8 @@ public class WaveBacktestService
                     new Dictionary<string, double>(bestPickers),
                     ref bufferLevel, _bufferCapacity,
                     forkliftTransitionSec, pickerTransitionSec,
-                    virtualDay, decisionCtx, workerNames);
+                    virtualDay, decisionCtx, workerNames,
+                    forkliftSpeedRatio, pickerSpeedRatio);
 
                 if (replDoneV + distDoneV == 0)
                     break; // нет прогресса — выходим
@@ -831,7 +847,9 @@ public class WaveBacktestService
             double pickerTransitionSec,
             DateTime day = default,
             SimulationDecisionContext? decisionCtx = null,
-            Dictionary<string, string>? workerNames = null)
+            Dictionary<string, string>? workerNames = null,
+            Dictionary<string, double>? forkliftSpeedRatio = null,
+            Dictionary<string, double>? pickerSpeedRatio = null)
     {
         var assignments = new Dictionary<string, List<ActionTiming>>();
         var forkliftLoad = forkliftCapacity.Keys.ToDictionary(k => k, _ => 0.0);
@@ -861,10 +879,12 @@ public class WaveBacktestService
 
                 foreach (var rg in replPool)
                 {
-                    // Capacity уже включает паузы (merged intervals), не вычитаем transition
+                    // ECT + эффективность: score = текущий load + задача × speedRatio
+                    // Быстрый работник (ratio<1) получает меньший score → берёт больше задач
                     var fk = forkliftRemaining
                         .Where(kv => kv.Value >= rg.DurationSec - tolerance)
-                        .OrderByDescending(kv => kv.Value)
+                        .OrderBy(kv => forkliftLoad[kv.Key]
+                            + rg.DurationSec * (forkliftSpeedRatio?.GetValueOrDefault(kv.Key, 1.0) ?? 1.0))
                         .Select(kv => kv.Key)
                         .FirstOrDefault();
 
@@ -972,10 +992,11 @@ public class WaveBacktestService
 
                 if (readyDist != null)
                 {
-                    // Capacity уже включает паузы (merged intervals), не вычитаем transition
+                    // ECT + эффективность: score = текущий finishTime + задача × speedRatio
                     var bestPicker = pickerRemaining
                         .Where(kv => kv.Value >= readyDist.DurationSec - tolerance)
-                        .OrderBy(kv => pickerFinishTime[kv.Key])
+                        .OrderBy(kv => pickerFinishTime[kv.Key]
+                            + readyDist.DurationSec * (pickerSpeedRatio?.GetValueOrDefault(kv.Key, 1.0) ?? 1.0))
                         .Select(kv => kv.Key)
                         .FirstOrDefault();
 
@@ -1372,15 +1393,19 @@ public class WaveBacktestService
             WaveStatus = data.Status,
             TotalReplenishmentTasks = data.ReplenishmentTasks
                 .Where(g => !string.IsNullOrWhiteSpace(g.AssigneeCode))
+                .GroupBy(g => g.TaskRef).Select(g => g.First())
                 .Sum(g => g.Actions.Count),
             TotalDistributionTasks = data.DistributionTasks
                 .Where(g => !string.IsNullOrWhiteSpace(g.AssigneeCode))
+                .GroupBy(g => g.TaskRef).Select(g => g.First())
                 .Sum(g => g.Actions.Count),
             TotalActions = data.ReplenishmentTasks
                 .Where(g => !string.IsNullOrWhiteSpace(g.AssigneeCode))
+                .GroupBy(g => g.TaskRef).Select(g => g.First())
                 .Sum(g => g.Actions.Count) +
                 data.DistributionTasks
                 .Where(g => !string.IsNullOrWhiteSpace(g.AssigneeCode))
+                .GroupBy(g => g.TaskRef).Select(g => g.First())
                 .Sum(g => g.Actions.Count),
             UniqueWorkers = actual.WorkerTimelines.Count,
             ActualStartTime = actual.StartTime,
@@ -1400,8 +1425,12 @@ public class WaveBacktestService
             DefaultEstimatesUsed = defaultUsed,
             WaveMeanDurationSec = simulated.WaveMeanDurationSec,
             // Кросс-дневные метрики
-            TotalReplGroups = data.ReplenishmentTasks.Count(t => !string.IsNullOrWhiteSpace(t.AssigneeCode)),
-            TotalDistGroups = data.DistributionTasks.Count(t => !string.IsNullOrWhiteSpace(t.AssigneeCode)),
+            TotalReplGroups = data.ReplenishmentTasks
+                .Where(t => !string.IsNullOrWhiteSpace(t.AssigneeCode))
+                .Select(t => t.TaskRef).Distinct().Count(),
+            TotalDistGroups = data.DistributionTasks
+                .Where(t => !string.IsNullOrWhiteSpace(t.AssigneeCode))
+                .Select(t => t.TaskRef).Distinct().Count(),
             OriginalWaveDays = origWaveDays,
             OptimizedWaveDays = optWaveDays,
             DaysSaved = origWaveDays - optWaveDays,
