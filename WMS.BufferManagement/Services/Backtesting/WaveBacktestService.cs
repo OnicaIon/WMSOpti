@@ -386,9 +386,11 @@ public class WaveBacktestService
                         dur = (action.CompletedAt.Value - action.StartedAt.Value).TotalSeconds;
                     if (dur < 0) dur = 0;
 
-                    var day = action.StartedAt?.Date
-                        ?? action.CompletedAt?.Date
-                        ?? data.WaveDate.Date;
+                    // Смена может пересекать полночь: действия до 06:00 = вчерашняя смена
+                    var ts = action.StartedAt ?? action.CompletedAt;
+                    var day = ts.HasValue
+                        ? (ts.Value.Hour < 6 ? ts.Value.Date.AddDays(-1) : ts.Value.Date)
+                        : data.WaveDate.Date;
 
                     result.Add(new AnnotatedAction
                     {
