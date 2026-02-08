@@ -1508,11 +1508,18 @@ public class WaveBacktestService
         Dictionary<string, double> speedRatio,
         double waveMeanDurationSec)
     {
-        double totalSec = 0;
+        // Каскад вычисляет персональный коэффициент = personalSum / baselineSum,
+        // затем умножает на масштабированную длительность группы (task.DurationSec).
+        // Это нужно потому что task.DurationSec уже масштабирована под capacity,
+        // а aa.DurationSec — сырые длительности (их сумма >> task.DurationSec).
+        double personalSum = 0;
+        double baselineSum = 0;
+
         foreach (var aa in task.Actions)
         {
             var productCode = aa.Action.ProductCode ?? "";
             var originalDur = aa.DurationSec > 0 ? aa.DurationSec : waveMeanDurationSec;
+            baselineSum += originalDur;
 
             // 1. Worker × Product (самое точное)
             if (!string.IsNullOrEmpty(productCode))
@@ -1520,7 +1527,7 @@ public class WaveBacktestService
                 var key = $"{workerCode}:{productCode}";
                 if (pickerLookup.TryGetValue(key, out var ps) && ps.AvgDurationSec.HasValue)
                 {
-                    totalSec += (double)ps.AvgDurationSec.Value;
+                    personalSum += (double)ps.AvgDurationSec.Value;
                     continue;
                 }
 
@@ -1530,14 +1537,14 @@ public class WaveBacktestService
                     var catKey = $"{workerCode}:{cat}";
                     if (workerCategoryAvg.TryGetValue(catKey, out var wcAvg))
                     {
-                        totalSec += wcAvg;
+                        personalSum += wcAvg;
                         continue;
                     }
 
                     // 3. Category avg (все работники)
                     if (categoryAvg.TryGetValue(cat, out var cAvg))
                     {
-                        totalSec += cAvg;
+                        personalSum += cAvg;
                         continue;
                     }
                 }
@@ -1545,10 +1552,15 @@ public class WaveBacktestService
 
             // 4. Средняя скорость работника (speedRatio × оригинальная длительность)
             var ratio = speedRatio.GetValueOrDefault(workerCode, 1.0);
-            totalSec += originalDur * ratio;
+            personalSum += originalDur * ratio;
             // (если ratio нет — уровень 5: originalDur × 1.0 = среднее по складу/волне)
         }
-        return Math.Max(totalSec, 1.0); // минимум 1с
+
+        // Коэффициент: насколько этот работник быстрее/медленнее среднего для данных действий
+        // Результат = масштабированная длительность группы × персональный коэффициент
+        if (baselineSum > 0)
+            return Math.Max(task.DurationSec * (personalSum / baselineSum), 1.0);
+        return Math.Max(task.DurationSec, 1.0);
     }
 
     /// <summary>
