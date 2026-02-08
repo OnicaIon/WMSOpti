@@ -19,46 +19,41 @@ public static class BacktestReportWriter
         PrintBoxTop(w);
         PrintBoxLine(w, $"  Бэктест волны {result.WaveNumber}");
         PrintBoxSep(w);
+
+        // Общая информация
         PrintBoxLine(w, $"  Дата волны:    {result.WaveDate:dd.MM.yyyy HH:mm}");
         PrintBoxLine(w, $"  Статус:        {result.WaveStatus}");
-        PrintBoxLine(w, $"  Replenishment: {result.TotalReplenishmentTasks} действий");
-        PrintBoxLine(w, $"  Distribution:  {result.TotalDistributionTasks} действий");
+        PrintBoxLine(w, $"  Действий:      repl {result.TotalReplenishmentTasks}, dist {result.TotalDistributionTasks}");
+        PrintBoxLine(w, $"  Палет (групп): repl {result.TotalReplGroups}, dist {result.TotalDistGroups}");
         PrintBoxLine(w, $"  Работников:    {result.UniqueWorkers}");
         PrintBoxSep(w);
 
-        var wallClockStr = FormatDuration(result.ActualWallClockDuration);
-        var factMakespanStr = FormatDuration(result.ActualActiveDuration);
-        var optMakespanStr = FormatDuration(result.OptimizedDuration);
+        // Главные метрики — дни и палеты
+        var totalFactP = result.DayBreakdowns.Sum(d => d.OriginalReplGroups + d.OriginalDistGroups);
+        var totalOptP = result.DayBreakdowns.Sum(d => d.OptimizedReplGroups + d.OptimizedDistGroups);
+        var firstDay = result.DayBreakdowns.Where(d => d.OriginalReplGroups + d.OriginalDistGroups > 0).Min(d => d.Date);
+        var lastDay = result.DayBreakdowns.Where(d => d.OriginalReplGroups + d.OriginalDistGroups > 0).Max(d => d.Date);
 
-        PrintBoxLine(w, $"  ФАКТ (от-до):  {wallClockStr}");
-        PrintBoxLine(w, $"  ФАКТ (работа): {factMakespanStr} (макс. рабочий/день)");
-        PrintBoxLine(w, $"  ОПТ  (работа): {optMakespanStr} (макс. рабочий/день)");
-        PrintBoxLine(w, $"  Метод:         Кросс-дневной пул + буфер");
+        PrintBoxLine(w, $"  ФАКТ:          {result.OriginalWaveDays} дн. ({firstDay:dd.MM} — {lastDay:dd.MM}), {totalFactP} палет");
+        PrintBoxLine(w, $"  ОПТИМИЗАЦИЯ:   {result.OptimizedWaveDays} дн., {totalOptP} палет");
 
-        // Основная метрика: сокращение дней
         if (result.DaysSaved > 0)
-        {
-            PrintBoxLine(w, $"  ВОЛНА:         {result.OriginalWaveDays} дн. -> {result.OptimizedWaveDays} дн. (-{result.DaysSaved} дн.)");
-            PrintBoxLine(w, $"  УЛУЧШЕНИЕ:     {result.ImprovementPercent:F1}% по дням");
-        }
-        else
-        {
-            PrintBoxLine(w, $"  ВОЛНА:         {result.OriginalWaveDays} дн. -> {result.OptimizedWaveDays} дн.");
-        }
-        PrintBoxLine(w, $"  БУФЕР:         {result.BufferCapacity} палет (макс)");
+            PrintBoxLine(w, $"  УЛУЧШЕНИЕ:     {result.ImprovementPercent:F1}% (-{result.DaysSaved} дн.)");
 
-        // Время переходов между палетами (из исторических данных БД)
+        PrintBoxLine(w, $"  Метод:         Кросс-дневной пул + буфер");
+        PrintBoxLine(w, $"  Буфер:         {result.BufferCapacity} палет (макс)");
+
+        // Время переходов между палетами
         if (result.PickerTransitionSec > 0 || result.ForkliftTransitionSec > 0)
         {
-            PrintBoxLine(w, $"  ПЕРЕХОДЫ:      пикер {result.PickerTransitionSec:F1}с ({result.PickerTransitionCount} набл.)");
-            PrintBoxLine(w, $"                 форклифт {result.ForkliftTransitionSec:F1}с ({result.ForkliftTransitionCount} набл.)");
+            PrintBoxLine(w, $"  Переходы:      пикер {result.PickerTransitionSec:F0}с, форклифт {result.ForkliftTransitionSec:F0}с");
         }
         PrintBoxSep(w);
 
-        // Таблица по дням — палеты и буфер
+        // Таблица по дням — только палеты, работники, буфер (БЕЗ часов)
         if (result.DayBreakdowns.Any())
         {
-            PrintBoxLine(w, "  День       ФактП ОптП  +/-  Буф Работн  Факт    Опт");
+            PrintBoxLine(w, "  День     Работн  ФактП  ОптП   +/-  Буфер");
             foreach (var db in result.DayBreakdowns)
             {
                 var origP = db.OriginalReplGroups + db.OriginalDistGroups;
@@ -66,34 +61,34 @@ public static class BacktestReportWriter
                 var delta = db.AdditionalPallets;
                 var deltaStr = delta >= 0 ? $"+{delta}" : $"{delta}";
                 var workers = $"{db.ForkliftWorkers}+{db.PickerWorkers}";
-                var factStr = FormatDurationShort(db.ActualMakespan);
-                var optStr2 = FormatDurationShort(db.OptimizedMakespan);
-                PrintBoxLine(w, $"  {db.Date:dd.MM} {origP,5} {optP,4} {deltaStr,4} ->{db.BufferLevelEnd,2} {workers,6}  {factStr,-7} {optStr2,-7}");
+                var dayMark = origP == 0 && optP > 0 ? "*" : " "; // * = виртуальный день
+                PrintBoxLine(w, $" {dayMark}{db.Date:dd.MM}   {workers,6}  {origP,5}  {optP,4}  {deltaStr,4}  ->{db.BufferLevelEnd,2}");
             }
-            var totalOrigP = result.DayBreakdowns.Sum(d => d.OriginalReplGroups + d.OriginalDistGroups);
-            var totalOptP = result.DayBreakdowns.Sum(d => d.OptimizedReplGroups + d.OptimizedDistGroups);
-            PrintBoxLine(w, $"  Итого {totalOrigP,5} {totalOptP,4}");
+            PrintBoxLine(w, $"  Итого          {totalFactP,5}  {totalOptP,4}");
             PrintBoxSep(w);
         }
 
         // Таблица работников
-        PrintBoxLine(w, "  Работник          Факт      Опт       Разница");
+        PrintBoxLine(w, "  Работник           Роль  Факт      Опт       %");
         foreach (var wb in result.WorkerBreakdowns.OrderByDescending(b => b.ActualDuration))
         {
             var name = $"{wb.WorkerCode} {wb.WorkerName}";
-            if (name.Length > 18) name = name[..18];
-            var factStr = FormatDurationShort(wb.ActualDuration);
-            var optWStr = FormatDurationShort(wb.OptimizedDuration);
+            if (name.Length > 20) name = name[..20];
+            var roleShort = wb.Role switch
+            {
+                "Forklift" => "Ф",
+                "Picker" => "П",
+                _ => "?"
+            };
+            var factStr = $"{wb.ActualTasks}з/{FormatDurationShort(wb.ActualDuration)}";
+            var optStr = $"{wb.OptimizedTasks}з/{FormatDurationShort(wb.OptimizedDuration)}";
             var sign = wb.ImprovementPercent > 0 ? "-" : "+";
-            PrintBoxLine(w, $"  {name,-18} {factStr,-9} {optWStr,-9} {sign}{Math.Abs(wb.ImprovementPercent):F1}%");
+            PrintBoxLine(w, $"  {name,-20} {roleShort}  {factStr,-11} {optStr,-11} {sign}{Math.Abs(wb.ImprovementPercent):F0}%");
         }
 
         PrintBoxSep(w);
-        PrintBoxLine(w, $"  Источники оценки времени:");
-        PrintBoxLine(w, $"    actual (из 1С):  {result.ActualDurationsUsed}");
-        PrintBoxLine(w, $"    route_stats:     {result.RouteStatsUsed}");
-        PrintBoxLine(w, $"    picker_product:  {result.PickerStatsUsed}");
-        PrintBoxLine(w, $"    default (~{result.WaveMeanDurationSec:F0}с): {result.DefaultEstimatesUsed}");
+        PrintBoxLine(w, $"  Источники оценки:");
+        PrintBoxLine(w, $"    actual: {result.ActualDurationsUsed}  default: {result.DefaultEstimatesUsed}  route: {result.RouteStatsUsed}  picker: {result.PickerStatsUsed}");
         PrintBoxBottom(w);
         System.Console.WriteLine();
     }
@@ -125,35 +120,34 @@ public static class BacktestReportWriter
         sb.AppendLine($"  Статус:                {result.WaveStatus}");
         sb.AppendLine($"  Replenishment действий:{result.TotalReplenishmentTasks}");
         sb.AppendLine($"  Distribution действий: {result.TotalDistributionTasks}");
-        sb.AppendLine($"  Всего действий:        {result.TotalActions}");
+        sb.AppendLine($"  Палет (групп):         repl {result.TotalReplGroups}, dist {result.TotalDistGroups}");
         sb.AppendLine($"  Уникальных работников: {result.UniqueWorkers}");
         sb.AppendLine();
 
         // Результаты сравнения
+        var totalFactP = result.DayBreakdowns.Sum(d => d.OriginalReplGroups + d.OriginalDistGroups);
+        var totalOptP = result.DayBreakdowns.Sum(d => d.OptimizedReplGroups + d.OptimizedDistGroups);
+
         sb.AppendLine("--- РЕЗУЛЬТАТЫ СРАВНЕНИЯ ---");
-        sb.AppendLine($"  Фактическое начало:    {result.ActualStartTime:dd.MM.yyyy HH:mm:ss}");
-        sb.AppendLine($"  Фактическое окончание: {result.ActualEndTime:dd.MM.yyyy HH:mm:ss}");
-        sb.AppendLine($"  Факт (от-до):          {FormatDuration(result.ActualWallClockDuration)} (включая ночи/перерывы)");
-        sb.AppendLine($"  Факт (работа):         {FormatDuration(result.ActualActiveDuration)} (макс. рабочий/день)");
-        sb.AppendLine($"  Опт  (работа):         {FormatDuration(result.OptimizedDuration)} (макс. рабочий/день)");
+        sb.AppendLine($"  Факт:                  {result.OriginalWaveDays} дн., {totalFactP} палет");
+        sb.AppendLine($"  Факт период:           {result.ActualStartTime:dd.MM.yyyy HH:mm} — {result.ActualEndTime:dd.MM.yyyy HH:mm}");
+        sb.AppendLine($"  Оптимизация:           {result.OptimizedWaveDays} дн., {totalOptP} палет");
+        sb.AppendLine($"  Улучшение:             {result.ImprovementPercent:F1}% ({(result.DaysSaved > 0 ? $"-{result.DaysSaved}" : "0")} дн.)");
         sb.AppendLine($"  Метод:                 Кросс-дневной пул + буфер");
         sb.AppendLine($"  Буфер:                 {result.BufferCapacity} палет (макс)");
-        sb.AppendLine($"  Волна:                 {result.OriginalWaveDays} дн. факт -> {result.OptimizedWaveDays} дн. опт ({(result.DaysSaved > 0 ? $"-{result.DaysSaved}" : "0")} дн.)");
-        sb.AppendLine($"  Улучшение:             {result.ImprovementPercent:F1}% по дням");
-        sb.AppendLine($"  Палеты (repl/dist):    {result.TotalReplGroups}/{result.TotalDistGroups}");
         if (result.PickerTransitionSec > 0 || result.ForkliftTransitionSec > 0)
         {
-            sb.AppendLine($"  Переход (пикер):       {result.PickerTransitionSec:F1}с медиана ({result.PickerTransitionCount} наблюдений из БД)");
-            sb.AppendLine($"  Переход (форклифт):    {result.ForkliftTransitionSec:F1}с медиана ({result.ForkliftTransitionCount} наблюдений из БД)");
+            sb.AppendLine($"  Переход (пикер):       {result.PickerTransitionSec:F1}с ({result.PickerTransitionCount} наблюдений)");
+            sb.AppendLine($"  Переход (форклифт):    {result.ForkliftTransitionSec:F1}с ({result.ForkliftTransitionCount} наблюдений)");
         }
         sb.AppendLine();
 
-        // Разбивка по дням — палеты + буфер + время
+        // Разбивка по дням — палеты и работники (БЕЗ часов)
         if (result.DayBreakdowns.Any())
         {
             sb.AppendLine("--- РАЗБИВКА ПО ДНЯМ ---");
-            sb.AppendLine($"  {"Дата",-12} {"Ф+П",5} {"ФактП",6} {"ОптП",5} {"+/-",5} {"Буф",4} {"Факт(makespan)",14} {"Опт(makespan)",14} {"Разница",8}");
-            sb.AppendLine($"  {new string('-', 85)}");
+            sb.AppendLine($"  {"Дата",-12} {"Работн",6} {"ФактП",6} {"ОптП",5} {"+/-",5} {"Буфер",6}");
+            sb.AppendLine($"  {new string('-', 50)}");
 
             foreach (var db in result.DayBreakdowns)
             {
@@ -162,16 +156,11 @@ public static class BacktestReportWriter
                 var optP = db.OptimizedReplGroups + db.OptimizedDistGroups;
                 var delta = db.AdditionalPallets;
                 var deltaStr = delta >= 0 ? $"+{delta}" : $"{delta}";
-                var sign = db.ImprovementPercent > 0 ? "-" : "+";
-                sb.AppendLine($"  {db.Date:dd.MM.yyyy}   {workers,5} {origP,6} {optP,5} {deltaStr,5} ->{db.BufferLevelEnd,2} {FormatDurationShort(db.ActualMakespan),14} {FormatDurationShort(db.OptimizedMakespan),14} {sign}{Math.Abs(db.ImprovementPercent):F1}%");
+                var dayMark = origP == 0 && optP > 0 ? "*" : " ";
+                sb.AppendLine($" {dayMark}{db.Date:dd.MM.yyyy}   {workers,6} {origP,6} {optP,5} {deltaStr,5} ->{db.BufferLevelEnd,3}");
             }
-
-            var totalOrigP = result.DayBreakdowns.Sum(d => d.OriginalReplGroups + d.OriginalDistGroups);
-            var totalOptP = result.DayBreakdowns.Sum(d => d.OptimizedReplGroups + d.OptimizedDistGroups);
-            var totalActual = TimeSpan.FromSeconds(result.DayBreakdowns.Sum(d => d.ActualMakespan.TotalSeconds));
-            var totalOpt = TimeSpan.FromSeconds(result.DayBreakdowns.Sum(d => d.OptimizedMakespan.TotalSeconds));
-            sb.AppendLine($"  {new string('-', 85)}");
-            sb.AppendLine($"  {"ИТОГО",-12} {"",5} {totalOrigP,6} {totalOptP,5} {"",5} {"",4} {FormatDurationShort(totalActual),14} {FormatDurationShort(totalOpt),14} {result.ImprovementPercent:F1}%");
+            sb.AppendLine($"  {new string('-', 50)}");
+            sb.AppendLine($"  {"ИТОГО",-12} {"",6} {totalFactP,6} {totalOptP,5}");
             sb.AppendLine();
         }
 
