@@ -29,26 +29,22 @@ public static class BacktestReportWriter
         var wallClockStr = FormatDuration(result.ActualWallClockDuration);
         var activeStr = FormatDuration(result.ActualActiveDuration);
         var optStr = FormatDuration(result.OptimizedDuration);
-        var diffStr = FormatDuration(result.ImprovementTime);
 
         PrintBoxLine(w, $"  ФАКТ (от-до):  {wallClockStr}");
-        PrintBoxLine(w, $"  ФАКТ (работа): {activeStr}");
-        PrintBoxLine(w, $"  ОПТИМИЗАЦИЯ:   {optStr}");
-
-        if (result.ImprovementPercent > 0)
-        {
-            PrintBoxLine(w, $"  УЛУЧШЕНИЕ:     {result.ImprovementPercent:F1}% (-{diffStr})");
-        }
-        else
-        {
-            PrintBoxLine(w, $"  РАЗНИЦА:       {result.ImprovementPercent:F1}% ({diffStr})");
-        }
-
+        PrintBoxLine(w, $"  ФАКТ (работа): {activeStr} (сумма ежедневн.)");
+        PrintBoxLine(w, $"  ОПТИМИЗАЦИЯ:   {optStr} (сумма makespan)");
         PrintBoxLine(w, $"  Метод:         Кросс-дневной пул + буфер");
+
+        // Основная метрика: сокращение дней
         if (result.DaysSaved > 0)
+        {
             PrintBoxLine(w, $"  ВОЛНА:         {result.OriginalWaveDays} дн. -> {result.OptimizedWaveDays} дн. (-{result.DaysSaved} дн.)");
+            PrintBoxLine(w, $"  УЛУЧШЕНИЕ:     {result.ImprovementPercent:F1}% по дням");
+        }
         else
+        {
             PrintBoxLine(w, $"  ВОЛНА:         {result.OriginalWaveDays} дн. -> {result.OptimizedWaveDays} дн.");
+        }
         PrintBoxLine(w, $"  БУФЕР:         {result.BufferCapacity} палет (макс)");
 
         // Время переходов между палетами (из исторических данных БД)
@@ -138,12 +134,12 @@ public static class BacktestReportWriter
         sb.AppendLine($"  Фактическое начало:    {result.ActualStartTime:dd.MM.yyyy HH:mm:ss}");
         sb.AppendLine($"  Фактическое окончание: {result.ActualEndTime:dd.MM.yyyy HH:mm:ss}");
         sb.AppendLine($"  Факт (от-до):          {FormatDuration(result.ActualWallClockDuration)} (включая ночи/перерывы)");
-        sb.AppendLine($"  Факт (работа):         {FormatDuration(result.ActualActiveDuration)} (только активное время)");
-        sb.AppendLine($"  Оптимизированное:      {FormatDuration(result.OptimizedDuration)}");
-        sb.AppendLine($"  Улучшение:             {result.ImprovementPercent:F1}% ({FormatDuration(result.ImprovementTime)})");
+        sb.AppendLine($"  Факт (работа):         {FormatDuration(result.ActualActiveDuration)} (сумма ежедневного активного)");
+        sb.AppendLine($"  Оптимизированное:      {FormatDuration(result.OptimizedDuration)} (сумма ежедневного makespan)");
         sb.AppendLine($"  Метод:                 Кросс-дневной пул + буфер");
         sb.AppendLine($"  Буфер:                 {result.BufferCapacity} палет (макс)");
         sb.AppendLine($"  Волна:                 {result.OriginalWaveDays} дн. факт -> {result.OptimizedWaveDays} дн. опт ({(result.DaysSaved > 0 ? $"-{result.DaysSaved}" : "0")} дн.)");
+        sb.AppendLine($"  Улучшение:             {result.ImprovementPercent:F1}% по дням");
         sb.AppendLine($"  Палеты (repl/dist):    {result.TotalReplGroups}/{result.TotalDistGroups}");
         if (result.PickerTransitionSec > 0 || result.ForkliftTransitionSec > 0)
         {

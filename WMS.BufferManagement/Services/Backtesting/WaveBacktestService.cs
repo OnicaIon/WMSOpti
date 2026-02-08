@@ -1161,17 +1161,22 @@ public class WaveBacktestService
         List<DayBreakdown> dayBreakdowns,
         Dictionary<string, double>? priorityByRef = null)
     {
-        // Итоговое сравнение: сумма активного времени по всем работникам
+        // Итоговое сравнение: сумма активного времени по дням
+        // Факт: merged intervals (параллельное активное время за день)
         var actualDuration = TimeSpan.FromSeconds(
             dayBreakdowns.Sum(d => d.ActualActiveDuration.TotalSeconds));
 
-        // Оптимизированное = сумма длительностей всех назначенных задач (work time, не makespan)
-        var optimizedWorkSec = simulated.WorkerTimelines.Sum(w => w.Duration.TotalSeconds);
-        var optimizedDuration = TimeSpan.FromSeconds(optimizedWorkSec);
+        // Оптимизированное: сумма ежедневных makespans (wall-clock за день)
+        var optimizedDuration = TimeSpan.FromSeconds(
+            dayBreakdowns.Sum(d => d.OptimizedMakespan.TotalSeconds));
 
         var improvementTime = actualDuration - optimizedDuration;
-        var improvementPercent = actualDuration.TotalSeconds > 0
-            ? (improvementTime.TotalSeconds / actualDuration.TotalSeconds) * 100
+
+        // Основная метрика: сокращение дней волны
+        var origWaveDays = dayBreakdowns.Count(d => d.OriginalReplGroups + d.OriginalDistGroups > 0);
+        var optWaveDays = dayBreakdowns.Count(d => d.OptimizedReplGroups + d.OptimizedDistGroups > 0);
+        var improvementPercent = origWaveDays > 0
+            ? ((double)(origWaveDays - optWaveDays) / origWaveDays) * 100
             : 0;
 
         // Разбивка по работникам
@@ -1345,9 +1350,6 @@ public class WaveBacktestService
         var routeStatsUsed = allSimActions.Count(a => a.DurationSource == "route_stats");
         var pickerStatsUsed = allSimActions.Count(a => a.DurationSource == "picker_product");
         var defaultUsed = allSimActions.Count(a => a.DurationSource == "default");
-
-        var origWaveDays = dayBreakdowns.Count(d => d.OriginalReplGroups + d.OriginalDistGroups > 0);
-        var optWaveDays = dayBreakdowns.Count(d => d.OptimizedReplGroups + d.OptimizedDistGroups > 0);
 
         return new BacktestResult
         {
