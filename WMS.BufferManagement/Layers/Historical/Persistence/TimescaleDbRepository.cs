@@ -1550,6 +1550,28 @@ public class TimescaleDbRepository : IHistoricalRepository, IAsyncDisposable
     }
 
     /// <summary>
+    /// Маппинг SKU → category_code из таблицы products
+    /// </summary>
+    public async Task<Dictionary<string, string>> GetProductCategoryMapAsync(CancellationToken cancellationToken = default)
+    {
+        var result = new Dictionary<string, string>();
+        await using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = new NpgsqlCommand(
+            "SELECT sku, category_code FROM products WHERE category_code IS NOT NULL AND category_code != '' AND sku IS NOT NULL AND sku != ''",
+            conn);
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var sku = reader.GetString(0);
+            var cat = reader.GetString(1);
+            result.TryAdd(sku, cat);
+        }
+        _logger.LogInformation("Загружено {Count} маппингов product→category", result.Count);
+        return result;
+    }
+
+    /// <summary>
     /// Получает статистику пикер + товар
     /// </summary>
     public async Task<List<PickerProductStats>> GetPickerProductStatsAsync(

@@ -177,6 +177,11 @@ public interface IHistoricalRepository
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Маппинг SKU → category_code из таблицы products (для каскадной оценки длительности)
+    /// </summary>
+    Task<Dictionary<string, string>> GetProductCategoryMapAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Среднее время перехода между палетами per worker из исторических данных.
     /// gap = next.started_at - prev.completed_at (в пределах одного дня, gap > 0 и &lt; 10 мин).
     /// </summary>

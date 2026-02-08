@@ -104,9 +104,10 @@ public class WaveBacktestService
         var routeStats = await _repository.GetRouteStatisticsAsync(cancellationToken: ct);
         var pickerStats = await _repository.GetPickerProductStatsAsync(cancellationToken: ct);
         var transitionStats = await _repository.GetWorkerTransitionStatsAsync(cancellationToken: ct);
+        var productCategoryMap = await _repository.GetProductCategoryMapAsync(ct);
 
-        _logger.LogInformation("Статистика: {Routes} маршрутов, {Pickers} пикер-товар, {Trans} переходов",
-            routeStats.Count, pickerStats.Count, transitionStats.Count);
+        _logger.LogInformation("Статистика: {Routes} маршрутов, {Pickers} пикер-товар, {Trans} переходов, {Cat} товар→категория",
+            routeStats.Count, pickerStats.Count, transitionStats.Count, productCategoryMap.Count);
 
         // Среднее время перехода по ролям (из исторических данных)
         var pickerTransitions = transitionStats.Where(t => t.WorkerRole == "Picker").ToList();
@@ -210,7 +211,7 @@ public class WaveBacktestService
         // 5. Кросс-дневная оптимизация с буфером (с контекстом решений)
         var (optimizedPlan, simulatedTimeline, dayBreakdowns, priorityByRef) =
             OptimizeCrossDay(waveData, actualTimeline, routeStats, pickerStats,
-                pickerTransitionSec, forkliftTransitionSec, decisionCtx);
+                pickerTransitionSec, forkliftTransitionSec, decisionCtx, productCategoryMap);
 
         var optDays = dayBreakdowns.Count(d => d.OptimizedReplGroups + d.OptimizedDistGroups > 0);
         var origDays = dayBreakdowns.Count(d => d.OriginalReplGroups + d.OriginalDistGroups > 0);
@@ -420,7 +421,8 @@ public class WaveBacktestService
             List<PickerProductStats> pickerStats,
             double pickerTransitionSec,
             double forkliftTransitionSec,
-            SimulationDecisionContext? decisionCtx = null)
+            SimulationDecisionContext? decisionCtx = null,
+            Dictionary<string, string>? productCategoryMap = null)
     {
         var allAnnotated = BuildAnnotatedActions(waveData);
 
@@ -430,6 +432,21 @@ public class WaveBacktestService
         var pickerLookup = pickerStats
             .GroupBy(p => $"{p.PickerId}:{p.ProductSku}")
             .ToDictionary(g => g.Key, g => g.First());
+
+        // === Каскад категорий: worker×category и category avg ===
+        var catMap = productCategoryMap ?? new Dictionary<string, string>();
+        // Уровень 2: среднее по (worker, category), мин. 5 товаров
+        var workerCategoryAvg = pickerStats
+            .Where(p => p.AvgDurationSec.HasValue && catMap.ContainsKey(p.ProductSku))
+            .GroupBy(p => $"{p.PickerId}:{catMap[p.ProductSku]}")
+            .Where(g => g.Count() >= 5)
+            .ToDictionary(g => g.Key, g => (double)g.Average(p => p.AvgDurationSec!.Value));
+        // Уровень 3: среднее по категории (все работники), мин. 10 записей
+        var categoryAvg = pickerStats
+            .Where(p => p.AvgDurationSec.HasValue && catMap.ContainsKey(p.ProductSku))
+            .GroupBy(p => catMap[p.ProductSku])
+            .Where(g => g.Count() >= 10)
+            .ToDictionary(g => g.Key, g => (double)g.Average(p => p.AvgDurationSec!.Value));
 
         var allDurations = allAnnotated.Where(a => a.DurationSec > 0).Select(a => a.DurationSec).ToList();
         var waveMeanDurationSec = allDurations.Any() ? allDurations.Average() : DefaultRouteDurationSec;
@@ -624,7 +641,9 @@ public class WaveBacktestService
                     ref bufferLevel, _bufferCapacity,
                     forkliftTransitionSec, pickerTransitionSec,
                     day, decisionCtx, workerNames,
-                    forkliftSpeedRatio, pickerSpeedRatio);
+                    forkliftSpeedRatio, pickerSpeedRatio,
+                    pickerLookup, productCategoryMap ?? new Dictionary<string, string>(),
+                    workerCategoryAvg, categoryAvg, waveMeanDurationSec);
 
                 // Merge assignments
                 foreach (var (wc, actions) in dayAssignments)
@@ -745,7 +764,9 @@ public class WaveBacktestService
                     ref bufferLevel, _bufferCapacity,
                     forkliftTransitionSec, pickerTransitionSec,
                     virtualDay, decisionCtx, workerNames,
-                    forkliftSpeedRatio, pickerSpeedRatio);
+                    forkliftSpeedRatio, pickerSpeedRatio,
+                    pickerLookup, productCategoryMap ?? new Dictionary<string, string>(),
+                    workerCategoryAvg, categoryAvg, waveMeanDurationSec);
 
                 if (replDoneV + distDoneV == 0)
                     break; // нет прогресса — выходим
@@ -849,7 +870,12 @@ public class WaveBacktestService
             SimulationDecisionContext? decisionCtx = null,
             Dictionary<string, string>? workerNames = null,
             Dictionary<string, double>? forkliftSpeedRatio = null,
-            Dictionary<string, double>? pickerSpeedRatio = null)
+            Dictionary<string, double>? pickerSpeedRatio = null,
+            Dictionary<string, PickerProductStats>? pickerLookup = null,
+            Dictionary<string, string>? productCategoryMap = null,
+            Dictionary<string, double>? workerCategoryAvg = null,
+            Dictionary<string, double>? categoryAvg = null,
+            double waveMeanDurationSec = 120.0)
     {
         var assignments = new Dictionary<string, List<ActionTiming>>();
         var forkliftLoad = forkliftCapacity.Keys.ToDictionary(k => k, _ => 0.0);
@@ -992,29 +1018,54 @@ public class WaveBacktestService
 
                 if (readyDist != null)
                 {
-                    // ECT + эффективность: score = текущий finishTime + задача × speedRatio
-                    var bestPicker = pickerRemaining
-                        .Where(kv => kv.Value >= readyDist.DurationSec - tolerance)
-                        .OrderBy(kv => pickerFinishTime[kv.Key]
-                            + readyDist.DurationSec * (pickerSpeedRatio?.GetValueOrDefault(kv.Key, 1.0) ?? 1.0))
-                        .Select(kv => kv.Key)
-                        .FirstOrDefault();
+                    // Персональная оценка длительности для каждого кандидата-пикера
+                    string? bestPicker = null;
+                    double bestPickerEstDur = 0;
+                    double bestPickerScore = double.MaxValue;
+                    var hasPersonalEstimate = pickerLookup != null && productCategoryMap != null
+                        && workerCategoryAvg != null && categoryAvg != null;
+
+                    foreach (var kv in pickerRemaining)
+                    {
+                        var estDur = hasPersonalEstimate
+                            ? EstimateGroupDurationForWorker(readyDist, kv.Key,
+                                pickerLookup!, productCategoryMap!, workerCategoryAvg!, categoryAvg!,
+                                pickerSpeedRatio ?? new Dictionary<string, double>(), waveMeanDurationSec)
+                            : readyDist.DurationSec * (pickerSpeedRatio?.GetValueOrDefault(kv.Key, 1.0) ?? 1.0);
+
+                        if (kv.Value < estDur - tolerance) continue; // не хватает capacity
+
+                        var score = pickerFinishTime[kv.Key] + estDur;
+                        if (score < bestPickerScore)
+                        {
+                            bestPickerScore = score;
+                            bestPicker = kv.Key;
+                            bestPickerEstDur = estDur;
+                        }
+                    }
 
                     if (bestPicker != null)
                     {
                         distPool.Remove(readyDist);
                         // Transition → только finish time (capacity уже включает паузы)
                         var pkTransition = pickerTaskCount[bestPicker] > 0 ? pickerTransitionSec : 0;
-                        pickerFinishTime[bestPicker] += pkTransition + readyDist.DurationSec;
-                        pickerRemaining[bestPicker] -= readyDist.DurationSec;
+                        pickerFinishTime[bestPicker] += pkTransition + bestPickerEstDur;
+                        pickerRemaining[bestPicker] -= bestPickerEstDur;
                         pickerTaskCount[bestPicker]++;
                         bufferLevel--;
                         distDone++;
 
                         if (!assignments.ContainsKey(bestPicker))
                             assignments[bestPicker] = new List<ActionTiming>();
+                        // Масштабировать длительности действий пропорционально персональной оценке
+                        var origGroupDur = readyDist.DurationSec > 0 ? readyDist.DurationSec : 1.0;
+                        var durScale = bestPickerEstDur / origGroupDur;
                         foreach (var aa in readyDist.Actions)
-                            assignments[bestPicker].Add(CreateActionTiming(aa, bestPicker));
+                        {
+                            var at = CreateActionTiming(aa, bestPicker);
+                            at.DurationSec *= durScale;
+                            assignments[bestPicker].Add(at);
+                        }
 
                         // --- Сбор данных для БД ---
                         if (decisionCtx != null)
@@ -1040,7 +1091,7 @@ public class WaveBacktestService
                                 ChosenWorkerCode = bestPicker,
                                 ChosenWorkerRemainingSec = pickerRemaining[bestPicker],
                                 ChosenTaskPriority = readyDist.Priority,
-                                ChosenTaskDurationSec = readyDist.DurationSec,
+                                ChosenTaskDurationSec = bestPickerEstDur,
                                 ChosenTaskWeightKg = (decimal)readyDist.WeightKg,
                                 BufferLevelBefore = bufferLevel + 1,
                                 BufferLevelAfter = bufferLevel,
@@ -1048,12 +1099,12 @@ public class WaveBacktestService
                                 AltWorkersJson = JsonSerializer.Serialize(altPickers),
                                 AltTasksJson = JsonSerializer.Serialize(altDists),
                                 ActiveConstraint = "none",
-                                ReasonText = $"Палета приоритет={readyDist.Priority:F0}, вес={readyDist.WeightKg:F1}кг → пикер {bestPicker} (финиш {pickerFinishTime[bestPicker]:F0}с)"
+                                ReasonText = $"Палета приоритет={readyDist.Priority:F0}, вес={readyDist.WeightKg:F1}кг → пикер {bestPicker} (ест.длит={bestPickerEstDur:F0}с, финиш {pickerFinishTime[bestPicker]:F0}с)"
                             });
 
                             // Событие Ганта (optimized)
                             var startOffset = workerTimeOffset[bestPicker] + pkTransition;
-                            var endOffset = startOffset + readyDist.DurationSec;
+                            var endOffset = startOffset + bestPickerEstDur;
                             workerTimeOffset[bestPicker] = endOffset;
                             var firstAction = readyDist.Actions.FirstOrDefault();
 
@@ -1068,7 +1119,7 @@ public class WaveBacktestService
                                 DayDate = day,
                                 StartTime = day.Date.AddSeconds(startOffset),
                                 EndTime = day.Date.AddSeconds(endOffset),
-                                DurationSec = readyDist.DurationSec,
+                                DurationSec = bestPickerEstDur,
                                 FromBin = firstAction?.Action.StorageBin,
                                 ToBin = firstAction?.Action.AllocationBin,
                                 FromZone = firstAction != null ? ExtractZone(firstAction.Action.StorageBin) : null,
@@ -1079,6 +1130,7 @@ public class WaveBacktestService
                                 Qty = readyDist.Actions.Sum(a => a.Action.QtyPlan > 0 ? a.Action.QtyPlan : 1),
                                 SequenceNumber = ++decisionCtx.SequenceCounter,
                                 BufferLevel = bufferLevel,
+                                DurationSource = hasPersonalEstimate ? "personal_cascade" : "speed_ratio",
                                 TransitionSec = pkTransition
                             });
                         }
@@ -1441,6 +1493,63 @@ public class WaveBacktestService
     // ============================================================================
     // Вспомогательные методы
     // ============================================================================
+
+    /// <summary>
+    /// Оценить длительность ВСЕЙ палеты для КОНКРЕТНОГО работника.
+    /// Каскад: 1) worker×product → 2) worker×category → 3) category avg → 4) speedRatio → 5) wave mean
+    /// </summary>
+    private static double EstimateGroupDurationForWorker(
+        TaskGroupInfo task,
+        string workerCode,
+        Dictionary<string, PickerProductStats> pickerLookup,
+        Dictionary<string, string> productCategoryMap,
+        Dictionary<string, double> workerCategoryAvg,
+        Dictionary<string, double> categoryAvg,
+        Dictionary<string, double> speedRatio,
+        double waveMeanDurationSec)
+    {
+        double totalSec = 0;
+        foreach (var aa in task.Actions)
+        {
+            var productCode = aa.Action.ProductCode ?? "";
+            var originalDur = aa.DurationSec > 0 ? aa.DurationSec : waveMeanDurationSec;
+
+            // 1. Worker × Product (самое точное)
+            if (!string.IsNullOrEmpty(productCode))
+            {
+                var key = $"{workerCode}:{productCode}";
+                if (pickerLookup.TryGetValue(key, out var ps) && ps.AvgDurationSec.HasValue)
+                {
+                    totalSec += (double)ps.AvgDurationSec.Value;
+                    continue;
+                }
+
+                // 2. Worker × Category
+                if (productCategoryMap.TryGetValue(productCode, out var cat) && !string.IsNullOrEmpty(cat))
+                {
+                    var catKey = $"{workerCode}:{cat}";
+                    if (workerCategoryAvg.TryGetValue(catKey, out var wcAvg))
+                    {
+                        totalSec += wcAvg;
+                        continue;
+                    }
+
+                    // 3. Category avg (все работники)
+                    if (categoryAvg.TryGetValue(cat, out var cAvg))
+                    {
+                        totalSec += cAvg;
+                        continue;
+                    }
+                }
+            }
+
+            // 4. Средняя скорость работника (speedRatio × оригинальная длительность)
+            var ratio = speedRatio.GetValueOrDefault(workerCode, 1.0);
+            totalSec += originalDur * ratio;
+            // (если ratio нет — уровень 5: originalDur × 1.0 = среднее по складу/волне)
+        }
+        return Math.Max(totalSec, 1.0); // минимум 1с
+    }
 
     /// <summary>
     /// Оценить длительность одного действия на основе статистики
