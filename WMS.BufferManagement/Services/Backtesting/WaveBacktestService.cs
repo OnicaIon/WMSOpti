@@ -903,9 +903,11 @@ public class WaveBacktestService
         {
             progress = false;
 
-            // === Попытка назначить 1 repl (буфер < capacity, пул не пуст) ===
-            if (bufferLevel < bufferCapacity && replPool.Any())
+            // === Фаза 1: загрузить буфер — все свободные форклифты получают задачи ===
+            bool replProgress = true;
+            while (replProgress && bufferLevel < bufferCapacity && replPool.Any())
             {
+                replProgress = false;
                 TaskGroupInfo? bestRepl = null;
                 string? bestForklift = null;
 
@@ -1013,13 +1015,16 @@ public class WaveBacktestService
                         });
                     }
 
+                    replProgress = true;
                     progress = true;
                 }
             }
 
-            // === Попытка назначить 1 dist (буфер > 0, есть готовая задача) ===
-            if (bufferLevel > 0)
+            // === Фаза 2: разгрузить буфер — все свободные пикеры получают задачи ===
+            bool distProgress = true;
+            while (distProgress && bufferLevel > 0)
             {
+                distProgress = false;
                 var readyDist = distPool
                     .Where(d => string.IsNullOrEmpty(d.PrevTaskRef) || completedRepl.Contains(d.PrevTaskRef))
                     .OrderByDescending(d => d.Priority)
@@ -1158,6 +1163,7 @@ public class WaveBacktestService
                             });
                         }
 
+                        distProgress = true;
                         progress = true;
                     }
                 }
